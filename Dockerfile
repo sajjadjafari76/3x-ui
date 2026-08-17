@@ -125,9 +125,13 @@ ENV XUI_SKIP_HSTS="true"
 ENV XUI_DB_TYPE=""
 ENV XUI_DB_DSN=""
 
-# Documentation only — Runflare routes to the port you configure, and the
-# default 2053 will not be reached unless you set XUI_PORT to match.
-EXPOSE 2053
+# Runflare's Docker service does not let the container pick its port: the
+# "version" chosen when the service is created is the exposed port, and the only
+# options are 80, 3000, 5000 and 8000. This service was created as
+# "Expose Port 8000", so the panel must listen on 8000 — set in the dashboard as
+# XUI_PORT=8000 (internal/config/config.go: GetPortOverride). Upstream's default
+# of 2053 is never routed to. Change both together or the panel is unreachable.
+EXPOSE 8000
 
 # No VOLUME declaration: Runflare attaches its own persistent disk, and an
 # anonymous-volume hint only confuses that.
