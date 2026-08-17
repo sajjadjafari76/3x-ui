@@ -7,10 +7,14 @@ import {
   normalizeSockoptForWire,
   normalizeStreamSettingsForWire,
   normalizeXhttpForWire,
+  validateRealityClientVer,
+  validateRealityMaxClientVer,
   validateRealityTarget,
 } from '@/lib/xray/stream-wire-normalize';
 import { InboundFormSchema } from '@/schemas/forms/inbound-form';
+import { HappyEyeballsSchema } from '@/schemas/protocols/stream/sockopt';
 import type { InboundFormValues } from '@/schemas/forms/inbound-form';
+import { XHttpXmuxSchema, XMUX_FRESH_DEFAULTS } from '@/schemas/protocols/stream/xhttp';
 
 describe('validateRealityTarget', () => {
   it('accepts host:port and bare port', () => {
@@ -21,6 +25,64 @@ describe('validateRealityTarget', () => {
   it('rejects host without port', () => {
     expect(validateRealityTarget('play.google.com')).toBe('pages.inbounds.form.realityTargetNeedsPort');
     expect(validateRealityTarget('')).toBe('pages.inbounds.form.realityTargetRequired');
+  });
+});
+
+describe('validateRealityClientVer', () => {
+  it('accepts empty (not set) and core-style versions', () => {
+    expect(validateRealityClientVer('')).toBeUndefined();
+    expect(validateRealityClientVer('26.3.27')).toBeUndefined();
+    expect(validateRealityClientVer('1.0.0')).toBeUndefined();
+    expect(validateRealityClientVer('26')).toBeUndefined();
+    expect(validateRealityClientVer('26.3')).toBeUndefined();
+    expect(validateRealityClientVer('0.0.255')).toBeUndefined();
+  });
+
+  it('rejects untrimmed values because the save path ships them verbatim', () => {
+    expect(validateRealityClientVer('26.3.27 ')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer(' 26.3.27')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer(' ')).toBe('pages.inbounds.form.clientVerInvalid');
+  });
+
+  it('rejects what the core parser rejects', () => {
+    expect(validateRealityClientVer('26.3.27.1')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer('26.3.256')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer('v26.3.27')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer('26..27')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer('26.3.')).toBe('pages.inbounds.form.clientVerInvalid');
+    expect(validateRealityClientVer('-1.0.0')).toBe('pages.inbounds.form.clientVerInvalid');
+  });
+});
+
+describe('validateRealityMaxClientVer', () => {
+  it('accepts an empty max, an empty min, and a valid range', () => {
+    expect(validateRealityMaxClientVer('', '26.3.27')).toBeUndefined();
+    expect(validateRealityMaxClientVer('27.0.0', '')).toBeUndefined();
+    expect(validateRealityMaxClientVer('26.3.27', '26.3.27')).toBeUndefined();
+    expect(validateRealityMaxClientVer('27.1.2', '26.3.27')).toBeUndefined();
+  });
+
+  it('rejects a max below the min, the stale-placeholder trap included', () => {
+    expect(validateRealityMaxClientVer('25.9.11', '26.3.27')).toBe(
+      'pages.inbounds.form.maxClientVerBelowMin',
+    );
+    expect(validateRealityMaxClientVer('26.3.26', '26.3.27')).toBe(
+      'pages.inbounds.form.maxClientVerBelowMin',
+    );
+  });
+
+  it('pads short versions like the core does before comparing', () => {
+    expect(validateRealityMaxClientVer('26', '26.0.0')).toBeUndefined();
+    expect(validateRealityMaxClientVer('26', '26.3')).toBe(
+      'pages.inbounds.form.maxClientVerBelowMin',
+    );
+  });
+
+  it('reports format errors before range errors and skips a malformed min', () => {
+    expect(validateRealityMaxClientVer('25.9', 'not-a-version')).toBeUndefined();
+    expect(validateRealityMaxClientVer('nope', '26.3.27')).toBe(
+      'pages.inbounds.form.clientVerInvalid',
+    );
   });
 });
 
@@ -51,6 +113,28 @@ describe('normalizeXhttpForWire stream-one', () => {
     expect(out).not.toHaveProperty('scStreamUpServerSecs');
     expect(out).not.toHaveProperty('enableXmux');
     expect(out).not.toHaveProperty('headers');
+  });
+
+  it('preserves non-default scMinPostsIntervalMs on inbound for subscriptions', () => {
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'packet-up',
+      scMinPostsIntervalMs: '50-150',
+      enableXmux: false,
+    }, 'inbound');
+
+    expect(out.scMinPostsIntervalMs).toBe('50-150');
+  });
+
+  it('strips empty scMinPostsIntervalMs on inbound', () => {
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'packet-up',
+      scMinPostsIntervalMs: '',
+      enableXmux: false,
+    }, 'inbound');
+
+    expect(out).not.toHaveProperty('scMinPostsIntervalMs');
   });
 
   it('keeps xmux on outbound stream-one', () => {
@@ -128,6 +212,27 @@ describe('normalizeXhttpForWire stream-one', () => {
     expect(xmux).not.toHaveProperty('maxConcurrency');
     expect(xmux.maxConnections).toBe('8');
   });
+
+  it('bare schema defaults keep only one exclusive xmux strategy non-zero', () => {
+    expect(XHttpXmuxSchema.parse({}).maxConnections).toBe(0);
+    expect(XHttpXmuxSchema.parse({}).maxConcurrency).toBe('16-32');
+  });
+
+  it('XMUX_FRESH_DEFAULTS seeds the core maxConnections fallback without a competing maxConcurrency', () => {
+    expect(XMUX_FRESH_DEFAULTS.maxConnections).toBe(3);
+    expect(XMUX_FRESH_DEFAULTS.maxConcurrency).toBe('');
+
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'stream-one',
+      enableXmux: true,
+      xmux: XMUX_FRESH_DEFAULTS,
+    }, 'outbound');
+
+    const xmux = out.xmux as Record<string, unknown>;
+    expect(xmux.maxConnections).toBe(3);
+    expect(xmux.maxConcurrency).toBe('');
+  });
 });
 
 describe('normalizeSockoptForWire', () => {
@@ -165,6 +270,22 @@ describe('normalizeSockoptForWire', () => {
       prioritizeIPv6: true,
     });
     expect(out?.domainStrategy).toBe('UseIP');
+  });
+
+  it('keeps a freshly toggled happyEyeballs (schema defaults) across the wire round trip', () => {
+    const out = normalizeSockoptForWire({
+      happyEyeballs: HappyEyeballsSchema.parse({}),
+    });
+
+    expect(out?.happyEyeballs).toEqual({ tryDelayMs: 250 });
+  });
+
+  it('keeps an explicit tryDelayMs of 0 so it cannot rehydrate as the 250 default', () => {
+    const out = normalizeSockoptForWire({
+      happyEyeballs: { tryDelayMs: 0, prioritizeIPv6: true, interleave: 1, maxConcurrentTry: 4 },
+    });
+
+    expect(out?.happyEyeballs).toEqual({ tryDelayMs: 0, prioritizeIPv6: true });
   });
 });
 
@@ -339,6 +460,102 @@ describe('inbound formValuesToWirePayload integration', () => {
     const tls = stream.tlsSettings as Record<string, unknown>;
     const settings = tls.settings as Record<string, unknown>;
     expect(settings).not.toHaveProperty('fingerprint');
+  });
+
+  it('preserves non-default scMinPostsIntervalMs in packet-up inbound wire payload for subscriptions', () => {
+    const values = {
+      remark: 't',
+      enable: true,
+      port: 443,
+      listen: '0.0.0.0',
+      tag: 'in-443',
+      expiryTime: 0,
+      sniffing: { enabled: false },
+      up: 0,
+      down: 0,
+      total: 0,
+      trafficReset: 'never',
+      lastTrafficResetTime: 0,
+      nodeId: null,
+      protocol: 'vless',
+      settings: { clients: [{ id: '7eeb09ed-ae97-400d-a1ce-2485fb904407', email: 'n' }], decryption: 'none' },
+      streamSettings: {
+        network: 'xhttp',
+        security: 'reality',
+        realitySettings: {
+          target: 'play.google.com:443',
+          privateKey: 'priv',
+          serverNames: ['play.google.com'],
+          shortIds: ['44003d86dc1e'],
+          settings: { publicKey: 'pub', fingerprint: 'chrome', spiderX: '/' },
+        },
+        xhttpSettings: {
+          path: '/app',
+          host: 'play.google.com',
+          mode: 'packet-up',
+          scMinPostsIntervalMs: '50-150',
+        },
+        sockopt: {},
+      },
+    };
+
+    const parsed = InboundFormSchema.safeParse(values);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw parsed.error;
+
+    const payload = formValuesToWirePayload(parsed.data);
+    const stream = JSON.parse(payload.streamSettings) as Record<string, unknown>;
+    const xhttp = stream.xhttpSettings as Record<string, unknown>;
+
+    expect(xhttp.scMinPostsIntervalMs).toBe('50-150');
+  });
+
+  it('strips default scMinPostsIntervalMs=30 from inbound wire payload', () => {
+    const values = {
+      remark: 't',
+      enable: true,
+      port: 443,
+      listen: '0.0.0.0',
+      tag: 'in-443',
+      expiryTime: 0,
+      sniffing: { enabled: false },
+      up: 0,
+      down: 0,
+      total: 0,
+      trafficReset: 'never',
+      lastTrafficResetTime: 0,
+      nodeId: null,
+      protocol: 'vless',
+      settings: { clients: [{ id: '7eeb09ed-ae97-400d-a1ce-2485fb904407', email: 'n' }], decryption: 'none' },
+      streamSettings: {
+        network: 'xhttp',
+        security: 'reality',
+        realitySettings: {
+          target: 'play.google.com:443',
+          privateKey: 'priv',
+          serverNames: ['play.google.com'],
+          shortIds: ['44003d86dc1e'],
+          settings: { publicKey: 'pub', fingerprint: 'chrome', spiderX: '/' },
+        },
+        xhttpSettings: {
+          path: '/app',
+          host: 'play.google.com',
+          mode: 'packet-up',
+          scMinPostsIntervalMs: '30',
+        },
+        sockopt: {},
+      },
+    };
+
+    const parsed = InboundFormSchema.safeParse(values);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw parsed.error;
+
+    const payload = formValuesToWirePayload(parsed.data);
+    const stream = JSON.parse(payload.streamSettings) as Record<string, unknown>;
+    const xhttp = stream.xhttpSettings as Record<string, unknown>;
+
+    expect(xhttp).not.toHaveProperty('scMinPostsIntervalMs');
   });
 });
 

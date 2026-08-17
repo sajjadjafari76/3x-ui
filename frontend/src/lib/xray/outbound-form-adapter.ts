@@ -1,19 +1,22 @@
 import { XHttpXmuxSchema } from '@/schemas/protocols/stream/xhttp';
+import { OutboundDomainStrategySchema } from '@/schemas/protocols/outbound';
 import { normalizeStreamSettingsForWire } from '@/lib/xray/stream-wire-normalize';
 import { Wireguard } from '@/utils';
+import type { Sniffing, SniffingDest } from '@/schemas/primitives';
+import type { OutboundDomainStrategy } from '@/schemas/protocols/outbound';
 
 import type {
   DnsOutboundFormSettings,
   DnsRuleForm,
   FreedomFinalRuleForm,
   FreedomOutboundFormSettings,
+  HttpOutboundFormSettings,
   HysteriaOutboundFormSettings,
   LoopbackOutboundFormSettings,
   MuxForm,
   OutboundFormSettings,
   OutboundFormValues,
   OutboundStreamFormValues,
-  ReverseSniffingForm,
   ShadowsocksOutboundFormSettings,
   TrojanOutboundFormSettings,
   VlessOutboundFormSettings,
@@ -55,21 +58,38 @@ function asPort(value: unknown, fallback: number): number {
   return n;
 }
 
-const REVERSE_SNIFFING_DEFAULT: ReverseSniffingForm = {
+// xray-core matches targetStrategy/domainStrategy case-insensitively;
+// normalize the wire value to the canonical spelling or '' (= AsIs).
+function targetStrategyFromWire(value: unknown): OutboundDomainStrategy | '' {
+  const s = asString(value);
+  if (!s) return '';
+  return OutboundDomainStrategySchema.options.find(
+    (v) => v.toLowerCase() === s.toLowerCase(),
+  ) ?? '';
+}
+
+const SNIFFING_DEST_VALUES: readonly SniffingDest[] = ['http', 'tls', 'quic', 'fakedns'];
+
+const SNIFFING_DEFAULT: Sniffing = {
   enabled: false,
-  destOverride: ['http', 'tls', 'quic', 'fakedns'],
+  destOverride: [...SNIFFING_DEST_VALUES],
   metadataOnly: false,
   routeOnly: false,
   ipsExcluded: [],
   domainsExcluded: [],
 };
 
-function reverseSniffingFromWire(raw: unknown): ReverseSniffingForm {
+// Shared by VLESS reverse sniffing and the loopback outbound — both edit the
+// same xray SniffingConfig. Unknown destOverride tokens are dropped so the
+// value satisfies SniffingSchema's enum.
+function sniffingFromWire(raw: unknown): Sniffing {
   const r = asObject(raw);
-  const dest = asArray(r.destOverride).map((x) => asString(x));
+  const dest = asArray(r.destOverride)
+    .map((x) => asString(x))
+    .filter((x): x is SniffingDest => (SNIFFING_DEST_VALUES as readonly string[]).includes(x));
   return {
     enabled: asBool(r.enabled),
-    destOverride: dest.length > 0 ? dest : ['http', 'tls', 'quic', 'fakedns'],
+    destOverride: dest.length > 0 ? dest : [...SNIFFING_DEST_VALUES],
     metadataOnly: asBool(r.metadataOnly),
     routeOnly: asBool(r.routeOnly),
     ipsExcluded: asArray(r.ipsExcluded).map((x) => asString(x)),
@@ -87,7 +107,7 @@ function vmessFromWire(raw: Raw): VmessOutboundFormSettings {
     id: asString(u.id),
     security: ((): VmessOutboundFormSettings['security'] => {
       const s = asString(u.security);
-      const allowed = ['aes-128-gcm', 'chacha20-poly1305', 'auto', 'none', 'zero'];
+      const allowed = ['aes-128-gcm', 'chacha20-poly1305', 'auto'];
       return (allowed.includes(s) ? s : 'auto') as VmessOutboundFormSettings['security'];
     })(),
   };
@@ -112,8 +132,8 @@ function vlessFromWire(raw: Raw): VlessOutboundFormSettings {
   const reverse = asObject(raw.reverse);
   const reverseTag = asString(reverse.tag);
   const reverseSniffing = reverseTag
-    ? reverseSniffingFromWire(reverse.sniffing)
-    : REVERSE_SNIFFING_DEFAULT;
+    ? sniffingFromWire(reverse.sniffing)
+    : SNIFFING_DEFAULT;
   const savedSeed = asArray(raw.testseed);
   const testseed = savedSeed.length === 4
     && savedSeed.every((n) => Number.isInteger(n) && (n as number) > 0)
@@ -171,6 +191,26 @@ function simpleAuthFromWire(raw: Raw, defaultPort: number): SimpleAuthFormSettin
   };
 }
 
+function stringRecordFromWire(raw: unknown): Record<string, string> {
+  const obj = asObject(raw);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
+// HTTP outbound reuses the SOCKS server/user shape but also carries xray's
+// top-level `settings.headers` (HTTPClientConfig.Headers), the CONNECT
+// headers sent to the upstream proxy. xray ignores per-server `headers`,
+// so only the settings-level map round-trips (issue #5519).
+function httpFromWire(raw: Raw): HttpOutboundFormSettings {
+  return {
+    ...simpleAuthFromWire(raw, 8080),
+    headers: stringRecordFromWire(raw.headers),
+  };
+}
+
 function wireguardFromWire(raw: Raw): WireguardOutboundFormSettings {
   const secretKey = asString(raw.secretKey);
   const pubKey = secretKey.length > 0
@@ -198,7 +238,6 @@ function wireguardFromWire(raw: Raw): WireguardOutboundFormSettings {
     secretKey,
     pubKey,
     address: addressArr.join(','),
-    workers: asNumber(raw.workers, 2),
     domainStrategy: ((): WireguardOutboundFormSettings['domainStrategy'] => {
       const allowed = ['ForceIP', 'ForceIPv4', 'ForceIPv4v6', 'ForceIPv6', 'ForceIPv6v4'];
       const s = asString(raw.domainStrategy);
@@ -258,14 +297,9 @@ function freedomFromWire(raw: Raw): FreedomOutboundFormSettings {
     && typeof raw.fragment === 'object'
     && Object.keys(fragment).length > 0;
   return {
-    domainStrategy: ((): FreedomOutboundFormSettings['domainStrategy'] => {
-      const allowed = [
-        'AsIs', 'UseIP', 'UseIPv4', 'UseIPv6', 'UseIPv6v4', 'UseIPv4v6',
-        'ForceIP', 'ForceIPv6v4', 'ForceIPv6', 'ForceIPv4v6', 'ForceIPv4',
-      ];
-      const s = asString(raw.domainStrategy);
-      return (allowed.includes(s) ? s : '') as FreedomOutboundFormSettings['domainStrategy'];
-    })(),
+    domainStrategy: targetStrategyFromWire(
+      asString(raw.targetStrategy) || asString(raw.domainStrategy),
+    ),
     redirect: asString(raw.redirect),
     userLevel: asNumber(raw.userLevel, 0),
     proxyProtocol: ((): FreedomOutboundFormSettings['proxyProtocol'] => {
@@ -324,7 +358,10 @@ function dnsFromWire(raw: Raw): DnsOutboundFormSettings {
 }
 
 function loopbackFromWire(raw: Raw): LoopbackOutboundFormSettings {
-  return { inboundTag: asString(raw.inboundTag) };
+  return {
+    inboundTag: asString(raw.inboundTag),
+    sniffing: sniffingFromWire(raw.sniffing),
+  };
 }
 
 function muxFromWire(raw: unknown): MuxForm {
@@ -344,15 +381,20 @@ export interface RawOutboundRow {
   tag?: string;
   protocol?: string;
   sendThrough?: string;
+  targetStrategy?: string;
   settings?: unknown;
   streamSettings?: unknown;
   mux?: unknown;
 }
 
-export const XMUX_DEFAULTS = XHttpXmuxSchema.parse({});
+const XMUX_DEFAULTS = XHttpXmuxSchema.parse({});
 
 function hydrateStreamForm(stream: Raw): OutboundStreamFormValues {
   const next = { ...stream };
+  if (typeof next.method === 'string' && next.method !== '') {
+    next.network = next.method;
+  }
+  delete next.method;
   const xh = next.xhttpSettings;
   if (xh && typeof xh === 'object' && !Array.isArray(xh)) {
     const xhttp = { ...(xh as Raw) };
@@ -371,6 +413,7 @@ export function rawOutboundToFormValues(raw: RawOutboundRow): OutboundFormValues
   const settings = asObject(raw.settings);
   const tag = asString(raw.tag);
   const sendThrough = asString(raw.sendThrough);
+  const targetStrategy = targetStrategyFromWire(raw.targetStrategy);
   const mux = muxFromWire(raw.mux);
   const hasStream = raw.streamSettings
     && typeof raw.streamSettings === 'object'
@@ -386,7 +429,7 @@ export function rawOutboundToFormValues(raw: RawOutboundRow): OutboundFormValues
     case 'trojan':      typed = { protocol: 'trojan',      settings: trojanFromWire(settings) }; break;
     case 'shadowsocks': typed = { protocol: 'shadowsocks', settings: shadowsocksFromWire(settings) }; break;
     case 'socks':       typed = { protocol: 'socks',       settings: simpleAuthFromWire(settings, 1080) }; break;
-    case 'http':        typed = { protocol: 'http',        settings: simpleAuthFromWire(settings, 8080) }; break;
+    case 'http':        typed = { protocol: 'http',        settings: httpFromWire(settings) }; break;
     case 'wireguard':   typed = { protocol: 'wireguard',   settings: wireguardFromWire(settings) }; break;
     case 'hysteria':    typed = { protocol: 'hysteria',    settings: hysteriaFromWire(settings) }; break;
     case 'freedom':     typed = { protocol: 'freedom',     settings: freedomFromWire(settings) }; break;
@@ -400,6 +443,7 @@ export function rawOutboundToFormValues(raw: RawOutboundRow): OutboundFormValues
     ...typed,
     tag,
     sendThrough,
+    targetStrategy,
     mux,
     streamSettings,
   };
@@ -417,7 +461,7 @@ function vmessToWire(s: VmessOutboundFormSettings) {
   };
 }
 
-function reverseSniffingToWire(s: ReverseSniffingForm) {
+function sniffingToWire(s: Sniffing) {
   return {
     enabled: s.enabled,
     destOverride: s.destOverride,
@@ -437,8 +481,8 @@ function vlessToWire(s: VlessOutboundFormSettings) {
     encryption: s.encryption || 'none',
   };
   if (s.reverseTag) {
-    const sn = reverseSniffingToWire(s.reverseSniffing);
-    const defaultSn = reverseSniffingToWire(REVERSE_SNIFFING_DEFAULT);
+    const sn = sniffingToWire(s.reverseSniffing);
+    const defaultSn = sniffingToWire(SNIFFING_DEFAULT);
     result.reverse = {
       tag: s.reverseTag,
       sniffing: JSON.stringify(sn) === JSON.stringify(defaultSn) ? {} : sn,
@@ -480,12 +524,19 @@ function simpleAuthToWire(s: SimpleAuthFormSettings) {
   };
 }
 
+function httpToWire(s: HttpOutboundFormSettings): Raw {
+  const wire: Raw = simpleAuthToWire(s);
+  if (s.headers && Object.keys(s.headers).length > 0) {
+    wire.headers = s.headers;
+  }
+  return wire;
+}
+
 function wireguardToWire(s: WireguardOutboundFormSettings) {
   return {
     mtu: s.mtu || undefined,
     secretKey: s.secretKey,
     address: s.address ? s.address.split(',').map((x) => x.trim()).filter(Boolean) : [],
-    workers: s.workers || undefined,
     domainStrategy: s.domainStrategy || undefined,
     reserved: s.reserved
       ? s.reserved.split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n))
@@ -506,6 +557,8 @@ function hysteriaToWire(s: HysteriaOutboundFormSettings) {
 }
 
 function freedomToWire(s: FreedomOutboundFormSettings) {
+  // The strategy is emitted under the legacy domainStrategy key: new cores
+  // fall back to it when targetStrategy is absent, old cores only know it.
   // Legacy semantics: emit fragment only when the user actually populated
   // at least one of the four sub-fields. Defaults like packets='1-3' alone
   // are not enough — the modal's Fragment Switch sets all four together.
@@ -563,7 +616,13 @@ function dnsToWire(s: DnsOutboundFormSettings) {
 }
 
 function loopbackToWire(s: LoopbackOutboundFormSettings) {
-  return { inboundTag: s.inboundTag || undefined };
+  const result: Raw = { inboundTag: s.inboundTag || undefined };
+  // Sniffing rides only when enabled — a disabled block is a no-op for
+  // xray's BuildSniffingRequest, so omitting it keeps the wire minimal.
+  if (s.sniffing.enabled) {
+    result.sniffing = sniffingToWire(s.sniffing);
+  }
+  return result;
 }
 
 // canEnableMux mirrors the legacy Outbound.canEnableMux().
@@ -615,7 +674,7 @@ export function formValuesToWirePayload(values: OutboundFormValues): WireOutboun
     case 'trojan':      settings = trojanToWire(values.settings); break;
     case 'shadowsocks': settings = shadowsocksToWire(values.settings); break;
     case 'socks':       settings = simpleAuthToWire(values.settings); break;
-    case 'http':        settings = simpleAuthToWire(values.settings); break;
+    case 'http':        settings = httpToWire(values.settings); break;
     case 'wireguard':   settings = wireguardToWire(values.settings); break;
     case 'hysteria':    settings = hysteriaToWire(values.settings); break;
     case 'freedom':     settings = freedomToWire(values.settings); break;
@@ -629,6 +688,7 @@ export function formValuesToWirePayload(values: OutboundFormValues): WireOutboun
     settings,
   };
   if (values.tag) result.tag = values.tag;
+  if (values.targetStrategy) result.targetStrategy = values.targetStrategy;
 
   // streamSettings emission gates on canEnableStream — non-stream protocols
   // still emit just `sockopt` if that key is present (legacy behavior).

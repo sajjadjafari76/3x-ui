@@ -6,6 +6,7 @@ import {
   genInboundLinks,
   genShadowsocksLink,
   genTrojanLink,
+  applyVlessRoute,
   genVlessLink,
   genVmessLink,
   genWireguardConfig,
@@ -86,6 +87,55 @@ describe('genVlessLink', () => {
       expect(link).toMatchSnapshot();
     });
   }
+});
+
+describe('applyVlessRoute', () => {
+  const id = '11111111-2222-4333-8444-555555555555';
+  it('encodes a single value into the 3rd group and no-ops on invalid input', () => {
+    expect(applyVlessRoute(id, '443')).toBe('11111111-2222-01bb-8444-555555555555');
+    expect(applyVlessRoute(id, '53')).toBe('11111111-2222-0035-8444-555555555555');
+    expect(applyVlessRoute(id, '0')).toBe('11111111-2222-0000-8444-555555555555');
+    expect(applyVlessRoute(id, '65535')).toBe('11111111-2222-ffff-8444-555555555555');
+    expect(applyVlessRoute(id, '')).toBe(id);
+    expect(applyVlessRoute(id, undefined)).toBe(id);
+    expect(applyVlessRoute(id, '70000')).toBe(id);
+    expect(applyVlessRoute(id, '53,443')).toBe(id);
+    expect(applyVlessRoute(id, 'abc')).toBe(id);
+    expect(applyVlessRoute('short', '443')).toBe('short');
+  });
+});
+
+describe('genVlessLink vlessRoute', () => {
+  const [, raw] = fixturesForProtocol('vless')[0];
+  const typed = InboundSchema.parse(raw);
+
+  it('bakes a host route value into the link UUID 3rd group', () => {
+    const link = genVlessLink({
+      inbound: typed,
+      address: 'example.test',
+      port: typed.port,
+      forceTls: 'same',
+      remark: 'r',
+      clientId: '11111111-2222-4333-8444-555555555555',
+      flow: '' as never,
+      externalProxy: { forceTls: 'same', dest: 'example.test', port: typed.port, remark: '', vlessRoute: '443' },
+    });
+    expect(link).toContain('vless://11111111-2222-01bb-8444-555555555555@');
+  });
+
+  it('leaves the UUID unchanged when no route is set', () => {
+    const link = genVlessLink({
+      inbound: typed,
+      address: 'example.test',
+      port: typed.port,
+      forceTls: 'same',
+      remark: 'r',
+      clientId: '11111111-2222-4333-8444-555555555555',
+      flow: '' as never,
+      externalProxy: null,
+    });
+    expect(link).toContain('vless://11111111-2222-4333-8444-555555555555@');
+  });
 });
 
 describe('genTrojanLink', () => {
@@ -256,6 +306,43 @@ describe('genWireguardLink + genWireguardConfig', () => {
       expect({ link, config }).toMatchSnapshot();
     });
   }
+});
+
+describe('genWireguardLink + genWireguardConfig multi allowedIPs', () => {
+  const settings = {
+    secretKey: '',
+    mtu: 1280,
+    dns: '',
+    peers: [
+      {
+        privateKey: 'cLI',
+        allowedIPs: ['10.0.0.2/32', 'fd00::2/128'],
+      },
+    ],
+  } as unknown as WireguardInboundSettings;
+
+  it('joins every allowed IP into the share-link address param', () => {
+    const link = genWireguardLink({
+      settings,
+      address: 'wg.example.test',
+      port: 51820,
+      remark: 'dual-stack',
+      peerIndex: 0,
+    });
+    const u = new URL(link);
+    expect(u.searchParams.get('address')).toBe('10.0.0.2/32,fd00::2/128');
+  });
+
+  it('joins every allowed IP into the .conf Address line', () => {
+    const config = genWireguardConfig({
+      settings,
+      address: 'wg.example.test',
+      port: 51820,
+      remark: 'dual-stack',
+      peerIndex: 0,
+    });
+    expect(config).toContain('Address = 10.0.0.2/32, fd00::2/128\n');
+  });
 });
 
 describe('resolveAddr precedence', () => {
@@ -656,5 +743,75 @@ describe('genVlessLink flow gating (#5322)', () => {
       flow: 'xtls-rprx-vision',
     });
     expect(new URL(link).searchParams.get('flow')).toBe('xtls-rprx-vision');
+  });
+});
+
+describe('genVlessLink XHTTP extra compatibility', () => {
+  it('emits both sessionID and legacy session keys in XHTTP extra', () => {
+    const typed = InboundSchema.parse({
+      id: 1,
+      up: 0,
+      down: 0,
+      total: 0,
+      remark: 'xhttp-session',
+      enable: true,
+      expiryTime: 0,
+      listen: '',
+      port: 443,
+      tag: 'inbound-vless-xhttp',
+      sniffing: {
+        enabled: false,
+        destOverride: [],
+        metadataOnly: false,
+        routeOnly: false,
+        ipsExcluded: [],
+        domainsExcluded: [],
+      },
+      protocol: 'vless',
+      settings: {
+        clients: [
+          {
+            id: '11111111-2222-3333-4444-555555555555',
+            email: 'a@example.test',
+            flow: '',
+            limitIp: 0,
+            totalGB: 0,
+            expiryTime: 0,
+            enable: true,
+            tgId: 0,
+            subId: 's1',
+            comment: '',
+            reset: 0,
+          },
+        ],
+        decryption: 'none',
+        encryption: 'none',
+        fallbacks: [],
+      },
+      streamSettings: {
+        network: 'xhttp',
+        security: 'none',
+        xhttpSettings: {
+          path: '/sp',
+          host: 'edge.example.test',
+          mode: 'auto',
+          sessionIDPlacement: 'header',
+          sessionIDKey: 'X-Session',
+        },
+      },
+    });
+
+    const link = genVlessLink({
+      inbound: typed,
+      address: 'example.test',
+      port: 443,
+      clientId: '11111111-2222-3333-4444-555555555555',
+    });
+    const extra = JSON.parse(new URL(link).searchParams.get('extra') ?? '{}') as Record<string, unknown>;
+
+    expect(extra.sessionIDPlacement).toBe('header');
+    expect(extra.sessionIDKey).toBe('X-Session');
+    expect(extra.sessionPlacement).toBe('header');
+    expect(extra.sessionKey).toBe('X-Session');
   });
 });

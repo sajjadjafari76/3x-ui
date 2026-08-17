@@ -1,6 +1,6 @@
-import axios from 'axios';
-import type { AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
 import i18next from 'i18next';
+import { httpRequest } from '@/api/http-init';
+import type { HttpResponse } from '@/api/http-init';
 import { getMessage } from './messageBus';
 
 type RespEnvelope = { success?: unknown; msg?: unknown; obj?: unknown };
@@ -17,8 +17,13 @@ export class Msg<T = unknown> {
   }
 }
 
-export interface HttpOptions extends AxiosRequestConfig {
+export interface HttpOptions {
+  headers?: Record<string, string> | Headers;
+  params?: unknown;
+  timeout?: number;
+  signal?: AbortSignal;
   silent?: boolean;
+  silentSuccess?: boolean;
 }
 
 export interface HttpModal {
@@ -27,23 +32,27 @@ export interface HttpModal {
 }
 
 export class HttpUtil {
-  static _handleMsg(msg: unknown): void {
+  static _handleMsg(msg: unknown, silentSuccess = false): void {
     if (!(msg instanceof Msg) || msg.msg === '') {
       return;
     }
-    const messageType = msg.success ? 'success' : 'error';
-    getMessage()[messageType](msg.msg);
-    if (
-      msg.success &&
-      msg.obj &&
-      typeof msg.obj === 'object' &&
-      (msg.obj as { nodePending?: unknown }).nodePending === true
-    ) {
-      getMessage().warning(i18next.t('pages.inbounds.toasts.savedNodeOfflineWillSync'));
+    if (msg.success) {
+      if (!silentSuccess) {
+        getMessage().success(msg.msg);
+      }
+      if (
+        msg.obj &&
+        typeof msg.obj === 'object' &&
+        (msg.obj as { nodePending?: unknown }).nodePending === true
+      ) {
+        getMessage().warning(i18next.t('pages.inbounds.toasts.savedNodeOfflineWillSync'));
+      }
+      return;
     }
+    getMessage().error(msg.msg);
   }
 
-  static _respToMsg(resp: AxiosResponse | undefined): Msg {
+  static _respToMsg(resp: HttpResponse | undefined): Msg {
     if (!resp || !resp.data) {
       return new Msg(false, 'No response data');
     }
@@ -59,32 +68,55 @@ export class HttpUtil {
   }
 
   static async get<T = unknown>(url: string, params?: unknown, options: HttpOptions = {}): Promise<Msg<T>> {
-    const { silent, ...axiosOpts } = options;
+    const { silent, silentSuccess, ...rest } = options;
     try {
-      const resp = await axios.get(url, { params, ...axiosOpts });
+      const resp = await httpRequest('GET', url, undefined, { ...rest, params });
       const msg = this._respToMsg(resp) as Msg<T>;
-      if (!silent) this._handleMsg(msg);
+      if (!silent) this._handleMsg(msg, silentSuccess);
       return msg;
     } catch (error) {
-      console.error('GET request failed:', error);
-      const err = error as AxiosError<{ message?: string }>;
-      const errorMsg = new Msg<T>(false, err.response?.data?.message || err.message || 'Request failed');
-      if (!silent) this._handleMsg(errorMsg);
+      const err = error as { response?: { data?: { msg?: string; message?: string } }; message?: string };
+      const data = err.response?.data;
+      const errorMsg = new Msg<T>(false, data?.msg || data?.message || err.message || 'Request failed');
+      if (!silent) {
+        console.error('GET request failed:', error);
+        this._handleMsg(errorMsg);
+      }
       return errorMsg;
     }
   }
 
   static async post<T = unknown>(url: string, data?: unknown, options: HttpOptions = {}): Promise<Msg<T>> {
-    const { silent, ...axiosOpts } = options;
+    const { silent, silentSuccess, ...rest } = options;
     try {
-      const resp = await axios.post(url, data, axiosOpts);
+      const resp = await httpRequest('POST', url, data, rest);
       const msg = this._respToMsg(resp) as Msg<T>;
-      if (!silent) this._handleMsg(msg);
+      if (!silent) this._handleMsg(msg, silentSuccess);
       return msg;
     } catch (error) {
-      console.error('POST request failed:', error);
-      const err = error as AxiosError<{ message?: string }>;
-      const errorMsg = new Msg<T>(false, err.response?.data?.message || err.message || 'Request failed');
+      const err = error as { response?: { data?: { msg?: string; message?: string } }; message?: string };
+      const data = err.response?.data;
+      const errorMsg = new Msg<T>(false, data?.msg || data?.message || err.message || 'Request failed');
+      if (!silent) {
+        console.error('POST request failed:', error);
+        this._handleMsg(errorMsg);
+      }
+      return errorMsg;
+    }
+  }
+
+  static async delete<T = unknown>(url: string, options: HttpOptions = {}): Promise<Msg<T>> {
+    const { silent, silentSuccess, ...rest } = options;
+    try {
+      const resp = await httpRequest('DELETE', url, undefined, rest);
+      const msg = this._respToMsg(resp) as Msg<T>;
+      if (!silent) this._handleMsg(msg, silentSuccess);
+      return msg;
+    } catch (error) {
+      console.error('DELETE request failed:', error);
+      const err = error as { response?: { data?: { msg?: string; message?: string } }; message?: string };
+      const data = err.response?.data;
+      const errorMsg = new Msg<T>(false, data?.msg || data?.message || err.message || 'Request failed');
       if (!silent) this._handleMsg(errorMsg);
       return errorMsg;
     }
@@ -632,8 +664,10 @@ export class Base64 {
   }
 
   static decode(content: string = ''): string {
+    const normalized = content.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
     return new TextDecoder().decode(
-      Uint8Array.from(window.atob(content), (c) => c.charCodeAt(0)),
+      Uint8Array.from(window.atob(padded), (c) => c.charCodeAt(0)),
     );
   }
 }
@@ -672,6 +706,14 @@ export class CPUFormatter {
 }
 
 export class TimeFormatter {
+  static formatClock(unixSec: number): string {
+    const d = new Date(unixSec * 1000);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  }
+
   static formatSecond(second: number): string {
     if (second < 60) return second.toFixed(0) + 's';
     if (second < 3600) return (second / 60).toFixed(0) + 'm';
@@ -690,16 +732,6 @@ export class NumberFormatter {
   static toFixed(num: number, n: number): number {
     const m = Math.pow(10, n);
     return Math.floor(num * m) / m;
-  }
-}
-
-export class Utils {
-  static debounce<A extends unknown[]>(fn: (...args: A) => unknown, delay: number): (...args: A) => void {
-    let timeoutID: ReturnType<typeof setTimeout> | null = null;
-    return function (this: unknown, ...args: A) {
-      if (timeoutID !== null) clearTimeout(timeoutID);
-      timeoutID = setTimeout(() => fn.apply(this, args), delay);
-    };
   }
 }
 
@@ -786,38 +818,6 @@ export class ColorUtils {
       case now < (expiry as number): return COLORS.warning;
       default: return COLORS.danger;
     }
-  }
-}
-
-export class ArrayUtils {
-  static doAllItemsExist<T>(array1: T[], array2: T[]): boolean {
-    return array1.every((item) => array2.includes(item));
-  }
-}
-
-export interface BuildURLOptions {
-  host?: string;
-  port?: string;
-  isTLS?: boolean;
-  base: string;
-  path: string;
-}
-
-export class URLBuilder {
-  static buildURL({ host, port, isTLS, base, path }: BuildURLOptions): string {
-    if (!host || host.length === 0) host = window.location.hostname;
-    if (!port || port.length === 0) port = window.location.port;
-    if (isTLS === undefined) isTLS = window.location.protocol === 'https:';
-
-    const protocol = isTLS ? 'https:' : 'http:';
-    let portPart = String(port);
-    if (portPart === '' || (isTLS && portPart === '443') || (!isTLS && portPart === '80')) {
-      portPart = '';
-    } else {
-      portPart = `:${portPart}`;
-    }
-
-    return `${protocol}//${host}${portPart}${base}${path}`;
   }
 }
 
@@ -920,6 +920,8 @@ export type CalendarKind = 'gregorian' | 'jalalian';
 export class IntlUtil {
   static formatDate(date: string | number | Date | null | undefined, calendar: CalendarKind = 'gregorian'): string {
     if (date == null) return '';
+    const d = new Date(date);
+    if (!isFinite(d.getTime())) return '';
     const language = LanguageManager.getLanguage();
     const locale = calendar === 'jalalian' ? 'fa-IR' : language;
 
@@ -934,11 +936,12 @@ export class IntlUtil {
     };
 
     const intl = new Intl.DateTimeFormat(locale, intlOptions);
-    return intl.format(new Date(date));
+    return intl.format(d);
   }
 
   static formatRelativeTime(date: number | null | undefined): string {
     if (date == null) return '';
+    if (!isFinite(date)) return '';
     const language = LanguageManager.getLanguage();
     const now = new Date();
     const diff = date < 0

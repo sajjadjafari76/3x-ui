@@ -1,15 +1,142 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 )
+
+// TestRemoteDo_RejectsOversizeResponse: a node streaming a body larger than
+// maxRemoteResponseBytes must error out instead of the master buffering it
+// unbounded.
+func TestRemoteDo_RejectsOversizeResponse(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		chunk := bytes.Repeat([]byte("a"), 1<<20) // 1 MiB
+		for written := 0; written <= maxRemoteResponseBytes; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return // client stopped reading at the cap
+			}
+		}
+	}))
+	defer srv.Close()
+
+	r := NewRemote(nodeForServer(t, srv, "skip", ""), nil)
+	if _, err := r.do(context.Background(), http.MethodGet, "/probe", nil); !errors.Is(err, errRemoteResponseTooLarge) {
+		t.Fatalf("do() error = %v, want errRemoteResponseTooLarge", err)
+	}
+}
+
+// TestRemoteDo_AcceptsNormalResponse confirms the cap does not break a normal
+// under-limit envelope.
+func TestRemoteDo_AcceptsNormalResponse(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"msg":"ok","obj":{"x":1}}`))
+	}))
+	defer srv.Close()
+
+	r := NewRemote(nodeForServer(t, srv, "skip", ""), nil)
+	env, err := r.do(context.Background(), http.MethodGet, "/probe", nil)
+	if err != nil {
+		t.Fatalf("do() unexpected error: %v", err)
+	}
+	if env == nil || !env.Success {
+		t.Fatalf("env = %+v, want Success=true", env)
+	}
+}
+
+func TestRemoteSetInboundSubSortIndexSendsOnlyNarrowField(t *testing.T) {
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch req.URL.Path {
+		case "/panel/api/inbounds/list":
+			_, _ = w.Write([]byte(`{"success":true,"obj":[{"id":42,"tag":"remote-tag"}]}`))
+		case "/panel/api/inbounds/42/subSortIndex":
+			if err := req.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			posted = req.PostForm
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer srv.Close()
+	r := NewRemote(nodeForPlainServer(t, srv, "verify", "tok"), nil)
+	ib := &model.Inbound{Tag: "remote-tag", Settings: `{"clients":[{"email":"newer"}]}`}
+	if err := r.SetInboundSubSortIndex(context.Background(), ib, 7); err != nil {
+		t.Fatalf("SetInboundSubSortIndex: %v", err)
+	}
+	if got := posted.Get("subSortIndex"); got != "7" {
+		t.Fatalf("subSortIndex = %q, want 7", got)
+	}
+	if len(posted) != 1 {
+		t.Fatalf("posted fields = %v, want only subSortIndex", posted)
+	}
+}
+
+// TestReadCappedBody_Boundary pins the cap+1 contract cheaply (no large allocs):
+// a body of exactly limit is accepted; limit+1 and beyond are rejected.
+func TestReadCappedBody_Boundary(t *testing.T) {
+	const limit = 8
+	cases := []struct {
+		name    string
+		n       int
+		wantErr bool
+	}{
+		{"under", limit - 1, false},
+		{"exact", limit, false},
+		{"over-by-one", limit + 1, true},
+		{"way-over", limit * 4, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := readCappedBody(bytes.NewReader(bytes.Repeat([]byte("x"), c.n)), limit)
+			if c.wantErr {
+				if !errors.Is(err, errRemoteResponseTooLarge) {
+					t.Fatalf("n=%d: err=%v, want errRemoteResponseTooLarge", c.n, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("n=%d: unexpected err %v", c.n, err)
+			}
+			if len(raw) != c.n {
+				t.Fatalf("n=%d: read %d bytes, want %d", c.n, len(raw), c.n)
+			}
+		})
+	}
+}
+
+// TestRemoteDo_NonOKStatusReturnsHTTPError confirms a non-OK status is reported
+// as an HTTP error (with a bounded diagnostic snippet) rather than being read as
+// a success payload — i.e. status precedence over the body.
+func TestRemoteDo_NonOKStatusReturnsHTTPError(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+
+	r := NewRemote(nodeForServer(t, srv, "skip", ""), nil)
+	_, err := r.do(context.Background(), http.MethodGet, "/probe", nil)
+	if err == nil {
+		t.Fatal("do() error = nil, want HTTP 500 error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error = %q, want it to mention HTTP 500 and the body snippet", err)
+	}
+}
 
 type stubEgress struct{ url string }
 
@@ -48,13 +175,24 @@ func TestWireInboundIncludesShareAddressFields(t *testing.T) {
 	values := wireInbound(&model.Inbound{
 		ShareAddrStrategy: "custom",
 		ShareAddr:         "edge.example.com",
-	})
+	}, 0)
 
 	if got := values.Get("shareAddrStrategy"); got != "custom" {
 		t.Fatalf("shareAddrStrategy = %q, want custom", got)
 	}
 	if got := values.Get("shareAddr"); got != "edge.example.com" {
 		t.Fatalf("shareAddr = %q, want edge.example.com", got)
+	}
+}
+
+// A node that does not mirror DisableFlow re-injects Vision into its own xray
+// config and share links, undoing the opt-out on every multi-node deployment.
+func TestWireInboundCarriesDisableFlow(t *testing.T) {
+	if got := wireInbound(&model.Inbound{DisableFlow: true}, 0).Get("disableFlow"); got != "true" {
+		t.Fatalf("disableFlow = %q, want true", got)
+	}
+	if got := wireInbound(&model.Inbound{}, 0).Get("disableFlow"); got != "false" {
+		t.Fatalf("disableFlow = %q, want false", got)
 	}
 }
 
@@ -156,27 +294,60 @@ func TestIsNonEmptySlice(t *testing.T) {
 }
 
 func TestWireInboundTrafficReset(t *testing.T) {
-	with := wireInbound(&model.Inbound{TrafficReset: "daily"})
-	if got := with.Get("trafficReset"); got != "daily" {
-		t.Fatalf("trafficReset = %q, want daily", got)
+	with := wireInbound(&model.Inbound{TrafficReset: "monthly", TrafficResetDay: 15}, 0)
+	if got := with.Get("trafficReset"); got != "monthly" {
+		t.Fatalf("trafficReset = %q, want monthly", got)
+	}
+	if got := with.Get("trafficResetDay"); got != "15" {
+		t.Fatalf("trafficResetDay = %q, want 15", got)
 	}
 	// Empty TrafficReset must be omitted entirely, not sent as an empty field.
-	without := wireInbound(&model.Inbound{})
+	without := wireInbound(&model.Inbound{}, 0)
 	if without.Has("trafficReset") {
 		t.Fatalf("trafficReset must be omitted when empty, got %q", without.Get("trafficReset"))
 	}
 }
 
 func TestWireInboundDefaultsShareAddressStrategy(t *testing.T) {
-	values := wireInbound(&model.Inbound{})
+	values := wireInbound(&model.Inbound{}, 0)
 
 	if got := values.Get("shareAddrStrategy"); got != "node" {
 		t.Fatalf("shareAddrStrategy = %q, want node", got)
 	}
 
-	values = wireInbound(&model.Inbound{ShareAddrStrategy: "auto"})
+	values = wireInbound(&model.Inbound{ShareAddrStrategy: "auto"}, 0)
 	if got := values.Get("shareAddrStrategy"); got != "node" {
 		t.Fatalf("invalid shareAddrStrategy = %q, want node", got)
+	}
+}
+
+func TestStripNodeInboundTagPrefix(t *testing.T) {
+	cases := []struct {
+		nodeID int
+		tag    string
+		want   string
+	}{
+		{2, "n2-in-443-tcp", "in-443-tcp"},
+		{2, "in-443-tcp", "in-443-tcp"},
+		{2, "my-custom", "my-custom"},
+		{2, "n3-in-443-tcp", "n3-in-443-tcp"},
+		{0, "n2-in-443-tcp", "n2-in-443-tcp"},
+	}
+	for _, c := range cases {
+		if got := stripNodeInboundTagPrefix(c.nodeID, c.tag); got != c.want {
+			t.Fatalf("stripNodeInboundTagPrefix(%d, %q) = %q, want %q", c.nodeID, c.tag, got, c.want)
+		}
+	}
+}
+
+func TestWireInboundStripsNodeTagOnPush(t *testing.T) {
+	values := wireInbound(&model.Inbound{Tag: "n2-in-443-tcp"}, 2)
+	if got := values.Get("tag"); got != "in-443-tcp" {
+		t.Fatalf("tag = %q, want in-443-tcp", got)
+	}
+	values = wireInbound(&model.Inbound{Tag: "n2-in-443-tcp"}, 0)
+	if got := values.Get("tag"); got != "n2-in-443-tcp" {
+		t.Fatalf("nodeID 0 must not strip, got %q", got)
 	}
 }
 

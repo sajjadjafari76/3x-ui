@@ -175,6 +175,29 @@ describe('outbound-form-adapter: round-trip', () => {
     });
   });
 
+  it('http preserves top-level settings.headers across wire → form → wire (#5519)', () => {
+    const headers = { 'X-T5-Auth': '683556433', Host: '153.3.236.22:443' };
+    const form = rawOutboundToFormValues({
+      protocol: 'http',
+      tag: 'h',
+      settings: { servers: [{ address: 'a', port: 443, users: [] }], headers },
+    });
+    expect(form.protocol).toBe('http');
+    if (form.protocol === 'http') {
+      expect(form.settings.headers).toEqual(headers);
+    }
+    const back = formValuesToWirePayload(form);
+    expect(back.settings).toMatchObject({ headers });
+  });
+
+  it('http omits headers when empty', () => {
+    const back = formValuesToWirePayload(rawOutboundToFormValues({
+      protocol: 'http',
+      settings: { servers: [{ address: 'a', port: 8080, users: [] }] },
+    }));
+    expect(back.settings).not.toHaveProperty('headers');
+  });
+
   it('wireguard csv-joins address and reserved on read, splits on write', () => {
     const wire = {
       protocol: 'wireguard',
@@ -182,7 +205,6 @@ describe('outbound-form-adapter: round-trip', () => {
         mtu: 1420,
         secretKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
         address: ['10.0.0.1', 'fd00::1'],
-        workers: 2,
         peers: [{ publicKey: 'pk', allowedIPs: ['0.0.0.0/0'], endpoint: 'e:51820', preSharedKey: 'psk' }],
         reserved: [1, 2, 3],
         noKernelTun: false,
@@ -359,9 +381,90 @@ describe('outbound-form-adapter: round-trip', () => {
     expect(back.settings).toEqual({ inboundTag: 'tagged-inbound' });
   });
 
+  it('loopback omits sniffing when disabled', () => {
+    const form = rawOutboundToFormValues({
+      protocol: 'loopback',
+      settings: { inboundTag: 'tagged-inbound' },
+    });
+    if (form.protocol === 'loopback') {
+      expect(form.settings.sniffing.enabled).toBe(false);
+    }
+    const back = formValuesToWirePayload(form);
+    expect(back.settings).not.toHaveProperty('sniffing');
+  });
+
+  it('loopback round-trips sniffing when enabled', () => {
+    const wire = {
+      protocol: 'loopback',
+      settings: {
+        inboundTag: 'tagged-inbound',
+        sniffing: { enabled: true, destOverride: ['tls', 'http'], routeOnly: true },
+      },
+    };
+    const form = rawOutboundToFormValues(wire);
+    if (form.protocol === 'loopback') {
+      expect(form.settings.sniffing.enabled).toBe(true);
+      expect(form.settings.sniffing.destOverride).toEqual(['tls', 'http']);
+      expect(form.settings.sniffing.routeOnly).toBe(true);
+    }
+    const back = formValuesToWirePayload(form);
+    const sniffing = (back.settings as Record<string, unknown>).sniffing as Record<string, unknown>;
+    expect(sniffing.enabled).toBe(true);
+    expect(sniffing.destOverride).toEqual(['tls', 'http']);
+    expect(sniffing.routeOnly).toBe(true);
+  });
+
   it('unknown protocol falls back to vless without throwing', () => {
     const form = rawOutboundToFormValues({ protocol: 'mysterious', settings: {} });
     expect(form.protocol).toBe('vless');
+  });
+});
+
+describe('outbound-form-adapter: targetStrategy', () => {
+  it('round-trips a top-level targetStrategy', () => {
+    const back = formValuesToWirePayload(rawOutboundToFormValues({
+      protocol: 'vless',
+      settings: { address: 's', port: 443, id: '11111111-2222-4333-8444-555555555555', flow: '', encryption: 'none' },
+      targetStrategy: 'ForceIPv6v4',
+    }));
+    expect(back.targetStrategy).toBe('ForceIPv6v4');
+  });
+
+  it('normalizes wire case to the canonical spelling (core matches case-insensitively)', () => {
+    const form = rawOutboundToFormValues({
+      protocol: 'freedom',
+      settings: {},
+      targetStrategy: 'useipv4v6',
+    });
+    expect(form.targetStrategy).toBe('UseIPv4v6');
+  });
+
+  it('omits targetStrategy when unset and drops unknown values', () => {
+    const unset = formValuesToWirePayload(rawOutboundToFormValues({
+      protocol: 'freedom',
+      settings: {},
+    }));
+    expect(unset).not.toHaveProperty('targetStrategy');
+
+    const invalid = formValuesToWirePayload(rawOutboundToFormValues({
+      protocol: 'freedom',
+      settings: {},
+      targetStrategy: 'UseIPv5',
+    }));
+    expect(invalid).not.toHaveProperty('targetStrategy');
+  });
+
+  it('freedom prefers settings.targetStrategy over domainStrategy and emits the legacy key', () => {
+    const form = rawOutboundToFormValues({
+      protocol: 'freedom',
+      settings: { targetStrategy: 'UseIPv6', domainStrategy: 'UseIPv4' },
+    });
+    if (form.protocol === 'freedom') {
+      expect(form.settings.domainStrategy).toBe('UseIPv6');
+    }
+    const back = formValuesToWirePayload(form);
+    expect(back.settings).toMatchObject({ domainStrategy: 'UseIPv6' });
+    expect(back.settings).not.toHaveProperty('targetStrategy');
   });
 });
 
@@ -417,6 +520,29 @@ describe('outbound-form-adapter: xhttp xmux toggle', () => {
     const back = formValuesToWirePayload(form);
     const wireXhttp = (back.streamSettings as Record<string, unknown>).xhttpSettings as Record<string, unknown>;
     expect(wireXhttp).not.toHaveProperty('xmux');
+  });
+
+  it('keeps a saved maxConcurrency through a load/re-save round-trip', () => {
+    const wire = {
+      ...xmuxWire,
+      streamSettings: {
+        ...xmuxWire.streamSettings,
+        xhttpSettings: {
+          ...xmuxWire.streamSettings.xhttpSettings,
+          xmux: { maxConcurrency: '1-2' },
+        },
+      },
+    };
+    const form = rawOutboundToFormValues(wire);
+    const xhttp = (form.streamSettings as Record<string, unknown>).xhttpSettings as Record<string, unknown>;
+    const xmux = xhttp.xmux as Record<string, unknown>;
+    expect(xmux.maxConcurrency).toBe('1-2');
+    expect(xmux.maxConnections).toBe(0);
+
+    const back = formValuesToWirePayload(form);
+    const wireXhttp = (back.streamSettings as Record<string, unknown>).xhttpSettings as Record<string, unknown>;
+    const wireXmux = wireXhttp.xmux as Record<string, unknown>;
+    expect(wireXmux.maxConcurrency).toBe('1-2');
   });
 });
 

@@ -47,7 +47,7 @@ func (t *Tgbot) OnReceive() {
 		tgBotMutex.Unlock()
 
 		h.HandleMessage(func(ctx *th.Context, message telego.Message) error {
-			delete(userStates, message.Chat.ID)
+			userStateMgr.clear(message.Chat.ID)
 			t.SendMsgToTgbot(message.Chat.ID, t.I18nBot("tgbot.keyboardClosed"), tu.ReplyKeyboardRemove())
 			return nil
 		}, th.TextEqual(t.I18nBot("tgbot.buttons.closeKeyboard")))
@@ -62,7 +62,7 @@ func (t *Tgbot) OnReceive() {
 				messageWorkerPool <- struct{}{}        // Acquire worker
 				defer func() { <-messageWorkerPool }() // Release worker
 
-				delete(userStates, message.Chat.ID)
+				userStateMgr.clear(message.Chat.ID)
 				t.answerCommand(&message, message.Chat.ID, checkAdmin(message.From.ID))
 			}()
 			return nil
@@ -74,25 +74,26 @@ func (t *Tgbot) OnReceive() {
 				messageWorkerPool <- struct{}{}        // Acquire worker
 				defer func() { <-messageWorkerPool }() // Release worker
 
-				delete(userStates, query.Message.GetChat().ID)
+				userStateMgr.clear(query.Message.GetChat().ID)
 				t.answerCallback(&query, checkAdmin(query.From.ID))
 			}()
 			return nil
 		}, th.AnyCallbackQueryWithMessage())
 
 		h.HandleMessage(func(ctx *th.Context, message telego.Message) error {
-			if userState, exists := userStates[message.Chat.ID]; exists {
+			userStateMgr.maybePrune(time.Hour)
+			if userState, exists := userStateMgr.get(message.Chat.ID); exists {
 				switch userState {
 				case "awaiting_email":
 					if client_Email == strings.TrimSpace(message.Text) {
 						t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.using_default_value"), 3, tu.ReplyKeyboardRemove())
-						delete(userStates, message.Chat.ID)
+						userStateMgr.clear(message.Chat.ID)
 						return nil
 					}
 
 					client_Email = strings.TrimSpace(message.Text)
 					if t.isSingleWord(client_Email) {
-						userStates[message.Chat.ID] = "awaiting_email"
+						userStateMgr.set(message.Chat.ID, "awaiting_email")
 
 						cancel_btn_markup := tu.InlineKeyboard(
 							tu.InlineKeyboardRow(
@@ -103,26 +104,26 @@ func (t *Tgbot) OnReceive() {
 						t.SendMsgToTgbot(message.Chat.ID, t.I18nBot("tgbot.messages.incorrect_input"), cancel_btn_markup)
 					} else {
 						t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.received_email"), 3, tu.ReplyKeyboardRemove())
-						delete(userStates, message.Chat.ID)
+						userStateMgr.clear(message.Chat.ID)
 						t.addClient(message.Chat.ID, t.BuildClientDraftMessage())
 					}
 				case "awaiting_comment":
 					if client_Comment == strings.TrimSpace(message.Text) {
 						t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.using_default_value"), 3, tu.ReplyKeyboardRemove())
-						delete(userStates, message.Chat.ID)
+						userStateMgr.clear(message.Chat.ID)
 						return nil
 					}
 
 					client_Comment = strings.TrimSpace(message.Text)
 					t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.received_comment"), 3, tu.ReplyKeyboardRemove())
-					delete(userStates, message.Chat.ID)
+					userStateMgr.clear(message.Chat.ID)
 					t.addClient(message.Chat.ID, t.BuildClientDraftMessage())
 				case "awaiting_tg_id":
 					input := strings.TrimSpace(message.Text)
 					if input == "" || input == "-" || strings.EqualFold(input, "none") {
 						client_TgID = ""
 						t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.using_default_value"), 3, tu.ReplyKeyboardRemove())
-						delete(userStates, message.Chat.ID)
+						userStateMgr.clear(message.Chat.ID)
 						t.addClient(message.Chat.ID, t.BuildClientDraftMessage())
 						return nil
 					}
@@ -137,10 +138,9 @@ func (t *Tgbot) OnReceive() {
 					}
 					client_TgID = input
 					t.SendMsgToTgbotDeleteAfter(message.Chat.ID, t.I18nBot("tgbot.messages.userSaved"), 3, tu.ReplyKeyboardRemove())
-					delete(userStates, message.Chat.ID)
+					userStateMgr.clear(message.Chat.ID)
 					t.addClient(message.Chat.ID, t.BuildClientDraftMessage())
 				}
-
 			} else {
 				if message.UsersShared != nil {
 					if checkAdmin(message.From.ID) {
@@ -166,7 +166,7 @@ func (t *Tgbot) OnReceive() {
 			return nil
 		}, th.AnyMessage())
 
-		h.Start()
+		_ = h.Start()
 	}()
 }
 
@@ -204,7 +204,7 @@ func (t *Tgbot) answerCommand(message *telego.Message, chatId int64, isAdmin boo
 			if isAdmin {
 				t.searchClient(chatId, commandArgs[0])
 			} else {
-				t.getClientUsage(chatId, int64(message.From.ID), commandArgs[0])
+				t.getClientUsage(chatId, message.From.ID, commandArgs[0])
 			}
 		} else {
 			msg += t.I18nBot("tgbot.commands.usage")
@@ -234,6 +234,21 @@ func (t *Tgbot) answerCommand(message *telego.Message, chatId int64, isAdmin boo
 				handleUnknownCommand()
 				msg += t.I18nBot("tgbot.commands.restartUsage")
 			}
+		} else {
+			handleUnknownCommand()
+		}
+	case "clearall":
+		onlyMessage = true
+		if isAdmin {
+			inlineKeyboard := tu.InlineKeyboard(
+				tu.InlineKeyboardRow(
+					tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.cancelReset")).WithCallbackData(t.encodeQuery("reset_all_traffics_cancel")),
+				),
+				tu.InlineKeyboardRow(
+					tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.confirmResetTraffic")).WithCallbackData(t.encodeQuery("reset_all_traffics_c")),
+				),
+			)
+			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.messages.AreYouSure"), inlineKeyboard)
 		} else {
 			handleUnknownCommand()
 		}
@@ -424,16 +439,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 4 {
 							num, err := strconv.Atoi(dataArray[3])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -494,16 +500,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 3 {
 							num, err := strconv.Atoi(dataArray[2])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -594,12 +591,12 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 
 							if traffic.ExpiryTime > 0 {
 								if traffic.ExpiryTime-time.Now().Unix()*1000 < 0 {
-									date = -int64(days * 24 * 60 * 60000)
+									date = -(days * 24 * 60 * 60000)
 								} else {
-									date = traffic.ExpiryTime + int64(days*24*60*60000)
+									date = traffic.ExpiryTime + days*24*60*60000
 								}
 							} else {
-								date = traffic.ExpiryTime - int64(days*24*60*60000)
+								date = traffic.ExpiryTime - days*24*60*60000
 							}
 
 						}
@@ -624,16 +621,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 4 {
 							num, err := strconv.Atoi(dataArray[3])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -684,12 +672,12 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 				var date int64
 				if client_ExpiryTime > 0 {
 					if client_ExpiryTime-time.Now().Unix()*1000 < 0 {
-						date = -int64(days * 24 * 60 * 60000)
+						date = -(days * 24 * 60 * 60000)
 					} else {
-						date = client_ExpiryTime + int64(days*24*60*60000)
+						date = client_ExpiryTime + days*24*60*60000
 					}
 				} else {
-					date = client_ExpiryTime - int64(days*24*60*60000)
+					date = client_ExpiryTime - days*24*60*60000
 				}
 				client_ExpiryTime = date
 
@@ -706,16 +694,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 3 {
 							num, err := strconv.Atoi(dataArray[2])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -812,16 +791,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 4 {
 							num, err := strconv.Atoi(dataArray[3])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -885,16 +855,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 						if len(dataArray) == 3 {
 							num, err := strconv.Atoi(dataArray[2])
 							if err == nil {
-								switch num {
-								case -2:
-									inputNumber = 0
-								case -1:
-									if inputNumber > 0 {
-										inputNumber = (inputNumber / 10)
-									}
-								default:
-									inputNumber = (inputNumber * 10) + num
-								}
+								inputNumber = updateNumericInput(inputNumber, num)
 							}
 							if inputNumber == oldInputNumber {
 								t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.successfulOperation"))
@@ -1110,8 +1071,11 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 				}
 				t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.chooseInbound"), inbounds)
 			}
-
 		}
+	}
+
+	if !isAdmin && !isClientSelfCallback(callbackQuery.Data) {
+		return
 	}
 
 	switch callbackQuery.Data {
@@ -1236,7 +1200,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.chooseInbound"), inbounds)
 	case "add_client_ch_default_email":
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		userStates[chatId] = "awaiting_email"
+		userStateMgr.set(chatId, "awaiting_email")
 		cancel_btn_markup := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.use_default")).WithCallbackData("add_client_default_info"),
@@ -1246,7 +1210,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		t.SendMsgToTgbot(chatId, prompt_message, cancel_btn_markup)
 	case "add_client_ch_default_comment":
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		userStates[chatId] = "awaiting_comment"
+		userStateMgr.set(chatId, "awaiting_comment")
 		cancel_btn_markup := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.use_default")).WithCallbackData("add_client_default_info"),
@@ -1256,7 +1220,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		t.SendMsgToTgbot(chatId, prompt_message, cancel_btn_markup)
 	case "add_client_ch_default_tg_id":
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		userStates[chatId] = "awaiting_tg_id"
+		userStateMgr.set(chatId, "awaiting_tg_id")
 		cancel_btn_markup := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.use_default")).WithCallbackData("add_client_default_info"),
@@ -1357,10 +1321,10 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 	case "add_client_default_info":
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
 		t.SendMsgToTgbotDeleteAfter(chatId, t.I18nBot("tgbot.messages.using_default_value"), 3, tu.ReplyKeyboardRemove())
-		delete(userStates, chatId)
+		userStateMgr.clear(chatId)
 		t.addClient(chatId, t.BuildClientDraftMessage())
 	case "add_client_cancel":
-		delete(userStates, chatId)
+		userStateMgr.clear(chatId)
 		receiver_inbound_ID = 0
 		receiver_inbound_IDs = nil
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
@@ -1457,7 +1421,6 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 	case "get_sorted_traffic_usage_report":
 		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
 		emails, err := t.inboundService.GetAllEmails()
-
 		if err != nil {
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.errorOperation"), tu.ReplyKeyboardRemove())
 			return
@@ -1512,4 +1475,18 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 // checkAdmin checks if the given Telegram ID is an admin.
 func checkAdmin(tgId int64) bool {
 	return slices.Contains(adminIds, tgId)
+}
+
+// isClientSelfCallback reports whether a callback is one of the per-user client
+// actions that resolve their own data from the caller's Telegram id, and so are
+// safe to run for a non-admin. Every other callback is admin-only (default-deny).
+func isClientSelfCallback(data string) bool {
+	switch data {
+	case "client_traffic", "client_commands", "client_sub_links",
+		"client_individual_links", "client_qr_links":
+		return true
+	}
+	return strings.HasPrefix(data, "client_sub_links ") ||
+		strings.HasPrefix(data, "client_individual_links ") ||
+		strings.HasPrefix(data, "client_qr_links ")
 }

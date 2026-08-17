@@ -93,6 +93,7 @@ describe('parseVmessLink — XHTTP advanced fields', () => {
       scMaxBufferedPosts: 50,
       tls: 'tls',
     };
+    // legacy sessionKey must alias onto the renamed sessionIDKey (#6258)
     const link = `vmess://${Base64.encode(JSON.stringify(json))}`;
     const out = parseVmessLink(link);
     const xhttp = (out?.streamSettings as Record<string, unknown>).xhttpSettings as Record<string, unknown>;
@@ -101,7 +102,8 @@ describe('parseVmessLink — XHTTP advanced fields', () => {
     expect(xhttp.xPaddingHeader).toBe('X-Pad');
     expect(xhttp.xPaddingPlacement).toBe('header');
     expect(xhttp.xPaddingMethod).toBe('random');
-    expect(xhttp.sessionKey).toBe('X-Session');
+    expect(xhttp.sessionIDKey).toBe('X-Session');
+    expect(xhttp.sessionKey).toBeUndefined();
     expect(xhttp.seqKey).toBe('X-Seq');
     expect(xhttp.noSSEHeader).toBe(true);
     expect(xhttp.scMaxBufferedPosts).toBe(50);
@@ -135,7 +137,8 @@ describe('parseVlessLink — XHTTP advanced fields', () => {
       + '?type=xhttp&security=tls&host=edge.example&path=%2Fsp'
       + '&xPaddingObfsMode=true&xPaddingKey=secret-key&xPaddingHeader=X-Pad'
       + '&xPaddingPlacement=header&xPaddingMethod=random'
-      + '&sessionKey=X-Session&seqKey=X-Seq&noSSEHeader=true'
+      + '&sessionIDKey=X-Session&sessionIDTable=Base62&sessionIDLength=16-32'
+      + '&seqKey=X-Seq&noSSEHeader=true'
       + '&scMaxBufferedPosts=50'
       + '#imported-pad';
     const out = parseVlessLink(link);
@@ -145,7 +148,9 @@ describe('parseVlessLink — XHTTP advanced fields', () => {
     expect(xhttp.xPaddingHeader).toBe('X-Pad');
     expect(xhttp.xPaddingPlacement).toBe('header');
     expect(xhttp.xPaddingMethod).toBe('random');
-    expect(xhttp.sessionKey).toBe('X-Session');
+    expect(xhttp.sessionIDKey).toBe('X-Session');
+    expect(xhttp.sessionIDTable).toBe('Base62');
+    expect(xhttp.sessionIDLength).toBe('16-32');
     expect(xhttp.seqKey).toBe('X-Seq');
     expect(xhttp.noSSEHeader).toBe(true);
     expect(xhttp.scMaxBufferedPosts).toBe(50);
@@ -245,6 +250,17 @@ describe('parseShadowsocksLink', () => {
     expect(settings.servers[0].method).toBe('aes-256-gcm');
     expect(settings.servers[0].password).toBe('legacypw');
   });
+
+  it('decodes URL-safe base64 userinfo (as the emitter writes it)', () => {
+    const method = 'aes-256-gcm';
+    const password = '>>>';
+    const userinfo = Base64.encode(`${method}:${password}`, true);
+    expect(userinfo).toMatch(/[-_]/);
+    const out = parseShadowsocksLink(`ss://${userinfo}@1.2.3.4:8388#urlsafe`);
+    const settings = out?.settings as { servers: Array<{ method: string; password: string }> };
+    expect(settings.servers[0].method).toBe(method);
+    expect(settings.servers[0].password).toBe(password);
+  });
 });
 
 describe('parseHysteria2Link', () => {
@@ -284,8 +300,95 @@ describe('parseHysteria2Link', () => {
     const finalmask = stream.finalmask as Record<string, unknown>;
     expect(finalmask).toBeDefined();
     const udp = finalmask.udp as Array<Record<string, unknown>>;
+    expect(udp).toHaveLength(1);
     expect(udp[0].type).toBe('salamander');
     expect((udp[0].settings as Record<string, unknown>).password).toBe('ftwfgb9655hh2mgo');
+  });
+
+  it('reconstructs the salamander mask from standard obfs= without fm=', () => {
+    const link = 'hysteria2://auth@news.domain.org:8443?security=tls&sni=news.domain.org'
+      + '&obfs=salamander&obfs-password=ftwfgb9655hh2mgo#hy2-std-obfs';
+    const out = parseHysteria2Link(link);
+    expect(out).not.toBeNull();
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    expect(finalmask).toBeDefined();
+    const udp = finalmask.udp as Array<Record<string, unknown>>;
+    expect(udp).toHaveLength(1);
+    expect(udp[0].type).toBe('salamander');
+    expect((udp[0].settings as Record<string, unknown>).password).toBe('ftwfgb9655hh2mgo');
+  });
+
+  it('adds no salamander mask when the link carries neither obfs nor fm', () => {
+    const out = parseHysteria2Link('hysteria2://auth@srv:443?security=tls&sni=srv#hy2-plain');
+    expect(out).not.toBeNull();
+    expect((out!.streamSettings as Record<string, unknown>).finalmask).toBeUndefined();
+  });
+
+  it('ignores obfs=salamander when no obfs-password is present', () => {
+    const out = parseHysteria2Link('hysteria2://auth@srv:443?security=tls&obfs=salamander#hy2-nopw');
+    expect(out).not.toBeNull();
+    expect((out!.streamSettings as Record<string, unknown>).finalmask).toBeUndefined();
+  });
+
+  it.each([
+    ['obfs_password', 'obfs_password=aliaspw', 'aliaspw'],
+    ['obfsPassword', 'obfsPassword=camelpw', 'camelpw'],
+    ['case-insensitive type', 'obfs=Salamander&obfs-password=mixed', 'mixed'],
+  ])('accepts the %s form of the obfs pair', (_name, query, want) => {
+    const base = query.includes('obfs=') ? query : `obfs=salamander&${query}`;
+    const out = parseHysteria2Link(`hysteria2://auth@srv:443?security=tls&${base}#hy2-alias`);
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const udp = finalmask.udp as Array<Record<string, unknown>>;
+    expect(udp).toHaveLength(1);
+    expect(udp[0].type).toBe('salamander');
+    expect((udp[0].settings as Record<string, unknown>).password).toBe(want);
+  });
+
+  it('appends the obfs salamander mask alongside a non-salamander fm mask', () => {
+    const fm = encodeURIComponent(JSON.stringify({
+      udp: [{ type: 'mkcp-legacy', settings: { header: 'srtp' } }],
+    }));
+    const link = `hysteria2://auth@srv:443?security=tls&fm=${fm}&obfs=salamander&obfs-password=added#hy2-append`;
+    const out = parseHysteria2Link(link);
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const udp = finalmask.udp as Array<Record<string, unknown>>;
+    expect(udp).toHaveLength(2);
+    expect(udp[0].type).toBe('mkcp-legacy');
+    expect(udp[1].type).toBe('salamander');
+    expect((udp[1].settings as Record<string, unknown>).password).toBe('added');
+  });
+
+  it('fills the password of a password-less fm salamander mask from obfs', () => {
+    const fm = encodeURIComponent(JSON.stringify({
+      udp: [{ type: 'salamander', settings: {} }],
+    }));
+    const link = `hysteria2://auth@srv:443?security=tls&fm=${fm}&obfs=salamander&obfs-password=fromobfs#hy2-fill`;
+    const out = parseHysteria2Link(link);
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const udp = finalmask.udp as Array<Record<string, unknown>>;
+    expect(udp).toHaveLength(1);
+    expect((udp[0].settings as Record<string, unknown>).password).toBe('fromobfs');
+  });
+
+  it('reconstructs udpHop from the standard mport param', () => {
+    const out = parseHysteria2Link('hysteria2://auth@srv:443?security=tls&mport=20000-50000#hy2-mport');
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const quic = finalmask.quicParams as Record<string, unknown>;
+    const udpHop = quic.udpHop as Record<string, unknown>;
+    expect(udpHop.ports).toBe('20000-50000');
+    expect(udpHop.interval).toBe('5-10');
+  });
+
+  it('lets an fm= udpHop win over mport', () => {
+    const fm = encodeURIComponent(JSON.stringify({
+      quicParams: { udpHop: { ports: '30000-40000', interval: '7-9' } },
+    }));
+    const link = `hysteria2://auth@srv:443?security=tls&mport=1-2&fm=${fm}#hy2-mport-fm`;
+    const out = parseHysteria2Link(link);
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const udpHop = (finalmask.quicParams as Record<string, unknown>).udpHop as Record<string, unknown>;
+    expect(udpHop.ports).toBe('30000-40000');
+    expect(udpHop.interval).toBe('7-9');
   });
 
   it('round-trips the salamander packetSize (Gecko) under fm', () => {
@@ -301,6 +404,52 @@ describe('parseHysteria2Link', () => {
     expect(udp[0].type).toBe('salamander');
     expect(settings.password).toBe('ftwfgb9655hh2mgo');
     expect(settings.packetSize).toBe('100-200');
+  });
+
+  it('coerces string quicParams numerics under fm to integers — #5783', () => {
+    const fm = encodeURIComponent(JSON.stringify({
+      quicParams: {
+        keepAlivePeriod: '10s',
+        maxIdleTimeout: '30',
+        initStreamReceiveWindow: 524288,
+        maxIncomingStreams: true,
+        brutalUp: '100 mbps',
+      },
+    }));
+    const link = `hysteria2://78e7795a209c4c099f896a816fc8448f@news.domain.org:8443?security=tls&sni=news.domain.org&fm=${fm}#hy2-quic`;
+    const out = parseHysteria2Link(link);
+    expect(out).not.toBeNull();
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const quic = finalmask.quicParams as Record<string, unknown>;
+    expect(quic.keepAlivePeriod).toBe(10);
+    expect(quic.maxIdleTimeout).toBe(30);
+    expect(quic.initStreamReceiveWindow).toBe(524288);
+    expect('maxIncomingStreams' in quic).toBe(false);
+    expect(quic.brutalUp).toBe('100 mbps');
+  });
+
+  it('clamps quicParams to the ranges xray accepts and drops junk — #5783', () => {
+    const fm = encodeURIComponent(JSON.stringify({
+      quicParams: {
+        keepAlivePeriod: '1s',
+        maxIdleTimeout: '10m',
+        maxIncomingStreams: 4,
+        initStreamReceiveWindow: 'inf',
+        maxStreamReceiveWindow: -5,
+        initConnectionReceiveWindow: 1e30,
+      },
+    }));
+    const link = `hysteria2://78e7795a209c4c099f896a816fc8448f@news.domain.org:8443?security=tls&sni=news.domain.org&fm=${fm}#hy2-clamp`;
+    const out = parseHysteria2Link(link);
+    expect(out).not.toBeNull();
+    const finalmask = (out!.streamSettings as Record<string, unknown>).finalmask as Record<string, unknown>;
+    const quic = finalmask.quicParams as Record<string, unknown>;
+    expect(quic.keepAlivePeriod).toBe(2);
+    expect(quic.maxIdleTimeout).toBe(120);
+    expect(quic.maxIncomingStreams).toBe(8);
+    expect('initStreamReceiveWindow' in quic).toBe(false);
+    expect('maxStreamReceiveWindow' in quic).toBe(false);
+    expect('initConnectionReceiveWindow' in quic).toBe(false);
   });
 
   it('round-trips the realm tlsConfig under fm', () => {

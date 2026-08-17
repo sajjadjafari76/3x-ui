@@ -24,10 +24,18 @@ type Raw = Record<string, unknown>;
 // match the schema's authoring order so diffs read naturally.
 const XHTTP_STRING_KEYS = [
   'xPaddingBytes', 'xPaddingKey', 'xPaddingHeader', 'xPaddingPlacement',
-  'xPaddingMethod', 'sessionPlacement', 'sessionKey', 'seqPlacement',
-  'seqKey', 'uplinkDataPlacement', 'uplinkDataKey', 'scMaxEachPostBytes',
-  'scMinPostsIntervalMs', 'scStreamUpServerSecs', 'uplinkHTTPMethod',
+  'xPaddingMethod', 'sessionIDPlacement', 'sessionIDKey', 'sessionIDTable',
+  'sessionIDLength', 'seqPlacement', 'seqKey', 'uplinkDataPlacement',
+  'uplinkDataKey', 'scMaxEachPostBytes', 'scMinPostsIntervalMs',
+  'scStreamUpServerSecs', 'uplinkHTTPMethod',
 ] as const;
+// Legacy share links (pre xray-core #6258) carry sessionPlacement/sessionKey.
+// Map them onto the renamed keys so old links still import. Mirrors the
+// schema-level migrateLegacyXhttp.
+const XHTTP_LEGACY_ALIASES: Record<string, string> = {
+  sessionPlacement: 'sessionIDPlacement',
+  sessionKey: 'sessionIDKey',
+};
 const XHTTP_NUMBER_KEYS = [
   'scMaxBufferedPosts', 'serverMaxHeaderBytes', 'uplinkChunkSize',
 ] as const;
@@ -81,11 +89,23 @@ function applyXhttpStringFromParams(xhttp: Raw, params: URLSearchParams): void {
     const v = params.get(k);
     if (v !== null && v !== '') xhttp[k] = asBool(v);
   }
+  // Fill renamed keys from legacy params only when the new key is absent.
+  for (const [legacy, renamed] of Object.entries(XHTTP_LEGACY_ALIASES)) {
+    if (xhttp[renamed] === undefined) {
+      const v = params.get(legacy);
+      if (v !== null && v !== '') xhttp[renamed] = v;
+    }
+  }
 }
 
 function applyXhttpStringFromJson(xhttp: Raw, json: Record<string, unknown>): void {
   for (const k of XHTTP_STRING_KEYS) {
     if (typeof json[k] === 'string') xhttp[k] = json[k];
+  }
+  for (const [legacy, renamed] of Object.entries(XHTTP_LEGACY_ALIASES)) {
+    if (xhttp[renamed] === undefined && typeof json[legacy] === 'string') {
+      xhttp[renamed] = json[legacy];
+    }
   }
   for (const k of XHTTP_NUMBER_KEYS) {
     if (typeof json[k] === 'number') xhttp[k] = json[k];
@@ -198,10 +218,114 @@ function applyFinalMaskParam(stream: Raw, params: URLSearchParams): void {
   try {
     const parsed = JSON.parse(fm) as Record<string, unknown>;
     if (parsed && typeof parsed === 'object') {
+      sanitizeFinalMaskQuicParams(parsed);
       stream.finalmask = parsed;
     }
   } catch {
     // malformed fm — leave streamSettings.finalmask absent
+  }
+}
+
+function ensureFinalMask(stream: Raw): Raw {
+  if (!stream.finalmask || typeof stream.finalmask !== 'object') stream.finalmask = {};
+  return stream.finalmask as Raw;
+}
+
+// Rebuild the salamander mask from the standard Hysteria2 obfs pair (every
+// non-3x-ui client, and this panel's own generator, speak it instead of the
+// private fm=<json> dump). A salamander mask already carrying a password via fm=
+// wins; a password-less one is completed rather than left empty.
+function applyHysteria2Obfs(stream: Raw, params: URLSearchParams): void {
+  if ((params.get('obfs') ?? '').toLowerCase() !== 'salamander') return;
+  const password = firstParam(params, 'obfs-password', 'obfs_password', 'obfsPassword');
+  if (!password) return;
+  const finalmask = ensureFinalMask(stream);
+  const udp = Array.isArray(finalmask.udp) ? (finalmask.udp as Raw[]) : [];
+  const existing = udp.find((m) => m && typeof m === 'object' && (m as Raw).type === 'salamander') as Raw | undefined;
+  if (existing) {
+    const settings = (existing.settings && typeof existing.settings === 'object'
+      ? existing.settings
+      : (existing.settings = {})) as Raw;
+    if (typeof settings.password !== 'string' || settings.password.length === 0) settings.password = password;
+    return;
+  }
+  finalmask.udp = [...udp, { type: 'salamander', settings: { password } }];
+}
+
+// Rebuild the UDP port-hopping range from the standard mport param, which the
+// generator emits as finalmask.quicParams.udpHop.ports. A range already supplied
+// via fm= wins; the client-side interval falls back to the panel's default.
+function applyHysteria2Hop(stream: Raw, params: URLSearchParams): void {
+  const ports = firstParam(params, 'mport');
+  if (!ports) return;
+  const finalmask = ensureFinalMask(stream);
+  const quicParams = (finalmask.quicParams && typeof finalmask.quicParams === 'object'
+    ? finalmask.quicParams
+    : (finalmask.quicParams = {})) as Raw;
+  const existingHop = quicParams.udpHop as Raw | undefined;
+  if (existingHop && typeof existingHop.ports === 'string' && existingHop.ports.length > 0) return;
+  quicParams.udpHop = { ports, interval: '5-10' };
+}
+
+const QUIC_PARAMS_NUMERIC_KEYS = [
+  'initStreamReceiveWindow',
+  'maxStreamReceiveWindow',
+  'initConnectionReceiveWindow',
+  'maxConnectionReceiveWindow',
+  'maxIdleTimeout',
+  'keepAlivePeriod',
+  'maxIncomingStreams',
+] as const;
+
+const DURATION_SECONDS: Record<string, number> = { ms: 0.001, s: 1, m: 60, h: 3600 };
+
+const QUIC_NUMERIC_MAX = 1e15;
+
+function coerceQuicNumeric(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string') {
+    const asNumber = Number(value);
+    if (value.trim() !== '' && Number.isFinite(asNumber)) {
+      return Math.trunc(asNumber);
+    }
+    const duration = /^(-?\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(value.trim());
+    if (duration) {
+      return Math.trunc(Number(duration[1]) * DURATION_SECONDS[duration[2]]);
+    }
+  }
+  return null;
+}
+
+function clampQuicNumeric(key: string, n: number): number | null {
+  if (n < 0 || n > QUIC_NUMERIC_MAX) return null;
+  if (n === 0) return 0;
+  if (key === 'keepAlivePeriod') return Math.min(Math.max(n, 2), 60);
+  if (key === 'maxIdleTimeout') return Math.min(Math.max(n, 4), 120);
+  if (key === 'maxIncomingStreams') return Math.max(n, 8);
+  return n;
+}
+
+// xray-core rejects the whole config when these quicParams fields are not
+// plain integers within its accepted ranges (keepAlivePeriod 0 or 2-60,
+// maxIdleTimeout 0 or 4-120, maxIncomingStreams 0 or >= 8), so coerce
+// numeric/duration strings, clamp the ranged fields, and drop anything
+// unparseable, negative, or absurdly large (#5783). Mirrors the Go parser in
+// internal/util/link/outbound.go.
+function sanitizeFinalMaskQuicParams(parsed: Record<string, unknown>): void {
+  const raw = parsed.quicParams;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const quic = raw as Record<string, unknown>;
+  for (const key of QUIC_PARAMS_NUMERIC_KEYS) {
+    if (!(key in quic)) continue;
+    const coerced = coerceQuicNumeric(quic[key]);
+    const clamped = coerced === null ? null : clampQuicNumeric(key, coerced);
+    if (clamped === null) {
+      delete quic[key];
+      continue;
+    }
+    quic[key] = clamped;
   }
 }
 
@@ -213,6 +337,7 @@ function applySecurityParams(stream: Raw, params: URLSearchParams): void {
     const alpn = params.get('alpn');
     if (alpn) tls.alpn = alpn.split(',');
     tls.echConfigList = params.get('ech') ?? '';
+    tls.verifyPeerCertByName = params.get('vcn') ?? '';
     tls.pinnedPeerCertSha256 = params.get('pcs') ?? '';
   } else if (stream.security === 'reality') {
     const reality = stream.realitySettings as Raw;
@@ -276,6 +401,8 @@ export function parseVmessLink(link: string): Raw | null {
     }
 
     const port = Number(json.port) || 443;
+    const rawScy = (json.scy as string) || 'auto';
+    const userSecurity = rawScy === 'none' || rawScy === 'zero' ? 'auto' : rawScy;
     return {
       protocol: 'vmess',
       tag: typeof json.ps === 'string' ? json.ps : '',
@@ -283,7 +410,7 @@ export function parseVmessLink(link: string): Raw | null {
         vnext: [{
           address: json.add ?? '',
           port,
-          users: [{ id: json.id ?? '', security: (json.scy as string) || 'auto' }],
+          users: [{ id: json.id ?? '', security: userSecurity }],
         }],
       },
       streamSettings: stream,
@@ -372,8 +499,15 @@ export function parseShadowsocksLink(link: string): Raw | null {
   const core = queryIndex >= 0 ? linkNoHash.slice(0, queryIndex) : linkNoHash;
   const atIndex = core.indexOf('@');
   if (atIndex >= 0) {
-    try { userInfo = Base64.decode(core.slice('ss://'.length, atIndex)); }
-    catch { userInfo = core.slice('ss://'.length, atIndex); }
+    const rawUserInfo = core.slice('ss://'.length, atIndex);
+    if (rawUserInfo.includes(':')) {
+      // SIP022 (2022-blake3-*) userinfo is percent-encoded, never base64
+      // (a literal ':' can't appear in a base64/base64url string).
+      try { userInfo = decodeURIComponent(rawUserInfo); } catch { userInfo = rawUserInfo; }
+    } else {
+      try { userInfo = Base64.decode(rawUserInfo); }
+      catch { userInfo = rawUserInfo; }
+    }
     const hostPort = core.slice(atIndex + 1);
     const colon = hostPort.lastIndexOf(':');
     if (colon < 0) return null;
@@ -427,11 +561,13 @@ export function parseHysteria2Link(link: string): Raw | null {
       alpn: alpn ? alpn.split(',') : ['h3'],
       fingerprint: params.get('fp') ?? '',
       echConfigList: params.get('ech') ?? '',
-      verifyPeerCertByName: '',
+      verifyPeerCertByName: params.get('vcn') ?? '',
       pinnedPeerCertSha256: params.get('pinSHA256') ?? '',
     },
   };
   applyFinalMaskParam(stream, params);
+  applyHysteria2Obfs(stream, params);
+  applyHysteria2Hop(stream, params);
   return {
     protocol: 'hysteria',
     tag: decodeRemark(url),

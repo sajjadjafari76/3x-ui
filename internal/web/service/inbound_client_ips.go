@@ -79,6 +79,14 @@ func (s *InboundService) MergeInboundClientIps(incomingIps []model.InboundClient
 	now := time.Now().Unix()
 	cutoff := now - clientIpStaleAfterSeconds
 
+	// Node syncs run concurrently (one goroutine per node) and shared clients
+	// appear in several nodes' reports. Locking rows in each node's arbitrary
+	// report order lets two merges grab the same rows in opposite order, which
+	// Postgres aborts as a deadlock (40P01) — take them in one global order.
+	sort.Slice(incomingIps, func(i, j int) bool {
+		return incomingIps[i].ClientEmail < incomingIps[j].ClientEmail
+	})
+
 	tx := db.Begin()
 	defer func() {
 		if r := recover(); r != nil {
@@ -144,6 +152,13 @@ func (s *InboundService) MergeInboundClientIps(incomingIps []model.InboundClient
 }
 
 func (s *InboundService) UpdateClientIPs(tx *gorm.DB, oldEmail string, newEmail string) error {
+	// The caller only renames onto a free identity, so a row already sitting on
+	// newEmail is stale tracking data — drop it instead of failing the edit.
+	if oldEmail != newEmail {
+		if err := tx.Where("client_email = ?", newEmail).Delete(model.InboundClientIps{}).Error; err != nil {
+			return err
+		}
+	}
 	return tx.Model(model.InboundClientIps{}).Where("client_email = ?", oldEmail).Update("client_email", newEmail).Error
 }
 

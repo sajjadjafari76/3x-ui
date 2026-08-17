@@ -13,7 +13,7 @@ import {
   message,
 } from 'antd';
 import { ApiOutlined, SafetyOutlined, UserOutlined } from '@ant-design/icons';
-import { ClipboardManager, HttpUtil, RandomUtil } from '@/utils';
+import { ClipboardManager, HttpUtil, IntlUtil, RandomUtil } from '@/utils';
 import type { AllSetting } from '@/models/setting';
 import { SettingListItem } from '@/components/ui';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
@@ -32,11 +32,20 @@ interface ApiTokenRow {
   name: string;
   enabled: boolean;
   createdAt: number;
+  scope: 'admin' | 'monitor' | 'node-sync';
+  expiresAt: number;
 }
 
 interface SecurityTabProps {
   allSetting: AllSetting;
   updateSetting: (patch: Partial<AllSetting>) => void;
+  saveSetting: (payload: Partial<AllSetting> & Record<string, unknown>) => Promise<unknown>;
+}
+
+const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
+
+function apiTokenCreatedAtMilliseconds(createdAt: number): number {
+  return createdAt < UNIX_MILLISECONDS_THRESHOLD ? createdAt * 1000 : createdAt;
 }
 
 type TfaType = 'set' | 'confirm';
@@ -59,7 +68,7 @@ const TFA_INITIAL: TfaState = {
   onConfirm: () => {},
 };
 
-export default function SecurityTab({ allSetting, updateSetting }: SecurityTabProps) {
+export default function SecurityTab({ allSetting, updateSetting, saveSetting }: SecurityTabProps) {
   const { t } = useTranslation();
   const { isMobile } = useMediaQuery();
   const [modal, modalContextHolder] = Modal.useModal();
@@ -93,10 +102,10 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
     setUser((prev) => ({ ...prev, [key]: value }));
   }
 
-  const sendUpdateUser = useCallback(async () => {
+  const sendUpdateUser = useCallback(async (twoFactorCode = '') => {
     setUpdating(true);
     try {
-      const msg = await HttpUtil.post('/panel/api/setting/updateUser', user) as ApiMsg;
+      const msg = await HttpUtil.post('/panel/api/setting/updateUser', { ...user, twoFactorCode }) as ApiMsg;
       if (msg?.success) {
         await HttpUtil.post('/logout');
         const basePath = window.X_UI_BASE_PATH || '/';
@@ -112,9 +121,11 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
       openTfa({
         title: t('pages.settings.security.twoFactorModalChangeCredentialsTitle'),
         description: t('pages.settings.security.twoFactorModalChangeCredentialsStep'),
-        token: allSetting.twoFactorToken,
+        token: '',
         type: 'confirm',
-        onConfirm: (ok: boolean) => { if (ok) sendUpdateUser(); },
+        onConfirm: (ok: boolean, code?: string) => {
+          if (ok) sendUpdateUser(code || '');
+        },
       });
     } else {
       sendUpdateUser();
@@ -178,7 +189,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
       cancelText: t('cancel'),
       okType: 'danger',
       onOk: async () => {
-        const msg = await HttpUtil.post(`/panel/api/setting/apiTokens/delete/${row.id}`) as ApiMsg;
+        const msg = await HttpUtil.post(`/panel/api/setting/apiTokens/delete/${row.id}`, { expectedScope: row.scope }) as ApiMsg;
         if (msg?.success) await loadApiTokens();
       },
     });
@@ -186,7 +197,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
 
   async function toggleTokenEnabled(row: ApiTokenRow) {
     const target = !row.enabled;
-    const msg = await HttpUtil.post(`/panel/api/setting/apiTokens/setEnabled/${row.id}`, { enabled: target }) as ApiMsg;
+    const msg = await HttpUtil.post(`/panel/api/setting/apiTokens/setEnabled/${row.id}`, { enabled: target, expectedScope: row.scope }) as ApiMsg;
     if (msg?.success) {
       setApiTokens((prev) => prev.map((r) => (r.id === row.id ? { ...r, enabled: target } : r)));
     }
@@ -194,7 +205,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
 
   function formatTokenDate(ts: number): string {
     if (!ts) return '';
-    return new Date(ts * 1000).toLocaleString();
+    return IntlUtil.formatDate(apiTokenCreatedAtMilliseconds(ts));
   }
 
   function toggleTwoFactor() {
@@ -218,12 +229,21 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
       openTfa({
         title: t('pages.settings.security.twoFactorModalDeleteTitle'),
         description: t('pages.settings.security.twoFactorModalRemoveStep'),
-        token: allSetting.twoFactorToken,
+        token: '',
         type: 'confirm',
-        onConfirm: (ok: boolean) => {
+        onConfirm: async (ok: boolean, code?: string) => {
           if (!ok) return;
-          messageApi.success(t('pages.settings.security.twoFactorModalDeleteSuccess'));
-          updateSetting({ twoFactorEnable: false, twoFactorToken: '' });
+          const next = {
+            ...allSetting,
+            twoFactorEnable: false,
+            twoFactorToken: '',
+            twoFactorCode: code || '',
+          };
+          const msg = await saveSetting(next) as ApiMsg;
+          if (msg?.success) {
+            messageApi.success(t('pages.settings.security.twoFactorModalDeleteSuccess'));
+            updateSetting({ twoFactorEnable: false, twoFactorToken: '', hasTwoFactorToken: false });
+          }
         },
       });
     }

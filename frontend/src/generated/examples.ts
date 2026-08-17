@@ -16,6 +16,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "ldapFlagField": "",
     "ldapHost": "",
     "ldapInboundTags": "",
+    "ldapInsecureSkipVerify": false,
     "ldapInvertFlag": false,
     "ldapPassword": "",
     "ldapPort": 0,
@@ -25,6 +26,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "ldapUserAttr": "",
     "ldapUserFilter": "",
     "ldapVlessField": "",
+    "outboundDownThreshold": 1,
     "pageSize": 0,
     "panelOutbound": "",
     "remarkTemplate": "",
@@ -34,34 +36,46 @@ export const EXAMPLES: Record<string, unknown> = {
     "smtpEnable": false,
     "smtpEnabledEvents": "",
     "smtpEncryptionType": "",
+    "smtpFrom": "",
+    "smtpFromName": "",
     "smtpHost": "",
+    "smtpMemory": 0,
     "smtpPassword": "",
     "smtpPort": 1,
     "smtpTo": "",
     "smtpUsername": "",
     "subAnnounce": "",
     "subCertFile": "",
+    "subClashAutoDetect": false,
     "subClashEnable": false,
     "subClashEnableRouting": false,
     "subClashPath": "",
     "subClashRules": "",
     "subClashURI": "",
+    "subClashUserAgentRegex": "",
     "subDomain": "",
     "subEnable": false,
     "subEnableRouting": false,
     "subEncrypt": false,
+    "subHideSettings": false,
+    "subIncyEnableRouting": false,
+    "subIncyRoutingRules": "",
+    "subJsonAlwaysArray": false,
+    "subJsonAutoDetect": false,
     "subJsonEnable": false,
     "subJsonFinalMask": "",
     "subJsonMux": "",
     "subJsonPath": "",
     "subJsonRules": "",
     "subJsonURI": "",
+    "subJsonUserAgentRegex": "",
     "subKeyFile": "",
     "subListen": "",
     "subPath": "",
     "subPort": 1,
     "subProfileUrl": "",
     "subRoutingRules": "",
+    "subShowIdentityOnAllLinks": false,
     "subSupportUrl": "",
     "subThemeDir": "",
     "subTitle": "",
@@ -76,6 +90,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "tgCpu": 0,
     "tgEnabledEvents": "",
     "tgLang": "",
+    "tgMemory": 0,
     "tgRunTime": "",
     "timeLocation": "",
     "trafficDiff": 0,
@@ -113,6 +128,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "ldapFlagField": "",
     "ldapHost": "",
     "ldapInboundTags": "",
+    "ldapInsecureSkipVerify": false,
     "ldapInvertFlag": false,
     "ldapPassword": "",
     "ldapPort": 0,
@@ -122,6 +138,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "ldapUserAttr": "",
     "ldapUserFilter": "",
     "ldapVlessField": "",
+    "outboundDownThreshold": 1,
     "pageSize": 0,
     "panelOutbound": "",
     "remarkTemplate": "",
@@ -131,34 +148,46 @@ export const EXAMPLES: Record<string, unknown> = {
     "smtpEnable": false,
     "smtpEnabledEvents": "",
     "smtpEncryptionType": "",
+    "smtpFrom": "",
+    "smtpFromName": "",
     "smtpHost": "",
+    "smtpMemory": 0,
     "smtpPassword": "",
     "smtpPort": 1,
     "smtpTo": "",
     "smtpUsername": "",
     "subAnnounce": "",
     "subCertFile": "",
+    "subClashAutoDetect": false,
     "subClashEnable": false,
     "subClashEnableRouting": false,
     "subClashPath": "",
     "subClashRules": "",
     "subClashURI": "",
+    "subClashUserAgentRegex": "",
     "subDomain": "",
     "subEnable": false,
     "subEnableRouting": false,
     "subEncrypt": false,
+    "subHideSettings": false,
+    "subIncyEnableRouting": false,
+    "subIncyRoutingRules": "",
+    "subJsonAlwaysArray": false,
+    "subJsonAutoDetect": false,
     "subJsonEnable": false,
     "subJsonFinalMask": "",
     "subJsonMux": "",
     "subJsonPath": "",
     "subJsonRules": "",
     "subJsonURI": "",
+    "subJsonUserAgentRegex": "",
     "subKeyFile": "",
     "subListen": "",
     "subPath": "",
     "subPort": 1,
     "subProfileUrl": "",
     "subRoutingRules": "",
+    "subShowIdentityOnAllLinks": false,
     "subSupportUrl": "",
     "subThemeDir": "",
     "subTitle": "",
@@ -173,6 +202,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "tgCpu": 0,
     "tgEnabledEvents": "",
     "tgLang": "",
+    "tgMemory": 0,
     "tgRunTime": "",
     "timeLocation": "",
     "trafficDiff": 0,
@@ -190,18 +220,26 @@ export const EXAMPLES: Record<string, unknown> = {
   "ApiToken": {
     "createdAt": 0,
     "enabled": false,
+    "expiresAt": 0,
     "id": 0,
     "name": "",
+    "scope": "",
     "token": ""
   },
   "ApiTokenView": {
     "createdAt": 1736000000,
     "enabled": true,
+    "expiresAt": 0,
     "id": 2,
     "name": "central-panel-a",
+    "scope": "admin",
     "token": "new-token-string"
   },
   "Client": {
+    "adTag": "0123456789abcdef0123456789abcdef",
+    "allowedIPs": [
+      ""
+    ],
     "auth": "",
     "comment": "",
     "created_at": 0,
@@ -211,10 +249,15 @@ export const EXAMPLES: Record<string, unknown> = {
     "flow": "",
     "group": "",
     "id": "",
+    "keepAlive": 0,
     "limitIp": 0,
     "password": "",
+    "preSharedKey": "",
+    "privateKey": "",
+    "publicKey": "",
     "reset": 0,
     "reverse": null,
+    "secret": "ee1234567890abcdef1234567890abcd7777772e636c6f7564666c6172652e636f6d",
     "security": "",
     "subId": "",
     "tgId": 0,
@@ -228,6 +271,8 @@ export const EXAMPLES: Record<string, unknown> = {
     "inboundId": 0
   },
   "ClientRecord": {
+    "adTag": "",
+    "allowedIPs": "",
     "auth": "",
     "comment": "",
     "createdAt": 0,
@@ -237,10 +282,16 @@ export const EXAMPLES: Record<string, unknown> = {
     "flow": "",
     "group": "",
     "id": 0,
+    "keepAlive": 0,
+    "limitHwid": 0,
     "limitIp": 0,
     "password": "",
+    "preSharedKey": "",
+    "privateKey": "",
+    "publicKey": "",
     "reset": 0,
     "reverse": null,
+    "secret": "",
     "security": "",
     "subId": "",
     "tgId": 0,
@@ -259,6 +310,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "id": 14825,
     "inboundId": 1,
     "lastOnline": 1735680000000,
+    "lastSubFetch": 1735680000000,
     "reset": 0,
     "subId": "i7tvdpeffi0hvvf1",
     "total": 10737418240,
@@ -268,6 +320,54 @@ export const EXAMPLES: Record<string, unknown> = {
   "FallbackParentInfo": {
     "masterId": 0,
     "path": ""
+  },
+  "GeoCategory": {
+    "attributes": [
+      "ads",
+      "cn"
+    ],
+    "code": "google",
+    "entries": 1284
+  },
+  "GeoCategoryPage": {
+    "items": [
+      {
+        "attributes": [
+          "ads",
+          "cn"
+        ],
+        "code": "google",
+        "entries": 1284
+      }
+    ],
+    "total": 1043
+  },
+  "GeoEntry": {
+    "kind": "domain",
+    "value": "google.com"
+  },
+  "GeoEntryPage": {
+    "items": [
+      {
+        "kind": "domain",
+        "value": "google.com"
+      }
+    ],
+    "total": 1284
+  },
+  "GeoFile": {
+    "categories": 1043,
+    "error": "",
+    "kind": "site",
+    "modifiedAt": 1769558400000,
+    "name": "geosite.dat",
+    "size": 1467392
+  },
+  "GeodataTokenIssue": {
+    "code": "blabla",
+    "file": "geosite.dat",
+    "reason": "categoryMissing",
+    "token": "geosite:blabla"
   },
   "HistoryOfSeeders": {
     "id": 0,
@@ -286,6 +386,7 @@ export const EXAMPLES: Record<string, unknown> = {
     ],
     "finalMask": "",
     "fingerprint": "",
+    "groupId": "",
     "hostHeader": "",
     "id": 1,
     "inboundId": 1,
@@ -315,7 +416,54 @@ export const EXAMPLES: Record<string, unknown> = {
       ""
     ],
     "updatedAt": 0,
-    "verifyPeerCertByName": false,
+    "verifyPeerCertByName": "",
+    "vlessRoute": "443"
+  },
+  "HostGroup": {
+    "allowInsecure": false,
+    "alpn": [
+      ""
+    ],
+    "echConfigList": "",
+    "excludeFromSubTypes": [
+      ""
+    ],
+    "finalMask": "",
+    "fingerprint": "",
+    "groupId": "",
+    "hostHeader": "",
+    "hosts": [
+      ""
+    ],
+    "inboundIds": [
+      0
+    ],
+    "isDisabled": false,
+    "isHidden": false,
+    "keepSniBlank": false,
+    "mihomoIpVersion": "dual",
+    "mihomoX25519": false,
+    "muxParams": "",
+    "nodeGuids": [
+      ""
+    ],
+    "overrideSniFromAddress": false,
+    "path": "",
+    "pinnedPeerCertSha256": [
+      ""
+    ],
+    "port": 0,
+    "remark": "",
+    "security": "same",
+    "serverDescription": "",
+    "shuffleHost": false,
+    "sni": "",
+    "sockoptParams": "",
+    "sortOrder": 0,
+    "tags": [
+      ""
+    ],
+    "verifyPeerCertByName": "",
     "vlessRoute": ""
   },
   "Inbound": {
@@ -328,6 +476,7 @@ export const EXAMPLES: Record<string, unknown> = {
         "id": 14825,
         "inboundId": 1,
         "lastOnline": 1735680000000,
+        "lastSubFetch": 1735680000000,
         "reset": 0,
         "subId": "i7tvdpeffi0hvvf1",
         "total": 10737418240,
@@ -335,6 +484,7 @@ export const EXAMPLES: Record<string, unknown> = {
         "uuid": "e18c9a96-71bf-48d4-933f-8b9a46d4290c"
       }
     ],
+    "disableFlow": false,
     "down": 0,
     "enable": true,
     "expiryTime": 0,
@@ -356,6 +506,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "tag": "in-443-tcp",
     "total": 0,
     "trafficReset": "never",
+    "trafficResetDay": 1,
     "up": 0
   },
   "InboundClientIps": {
@@ -375,14 +526,23 @@ export const EXAMPLES: Record<string, unknown> = {
     "xver": 0
   },
   "InboundOption": {
+    "enable": true,
     "id": 1,
+    "listen": "",
+    "mtprotoDomain": "",
+    "nodeAddress": "",
     "nodeId": null,
     "port": 443,
     "protocol": "vless",
     "remark": "VLESS-443",
+    "shareAddr": "",
+    "shareAddrStrategy": "",
     "ssMethod": "",
     "tag": "in-443-tcp",
-    "tlsFlowCapable": true
+    "tlsFlowCapable": true,
+    "wgDns": "",
+    "wgMtu": 0,
+    "wgPublicKey": ""
   },
   "Msg": {
     "msg": "",
@@ -390,9 +550,9 @@ export const EXAMPLES: Record<string, unknown> = {
     "success": false
   },
   "Node": {
+    "activeCount": 23,
     "address": "node1.example.com",
     "allowPrivateAddress": false,
-    "apiToken": "abcdef0123456789",
     "basePath": "/",
     "clientCount": 27,
     "configDirty": false,
@@ -400,6 +560,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "cpuPct": 23.5,
     "createdAt": 1700000000,
     "depletedCount": 1,
+    "disabledCount": 3,
     "enable": true,
     "guid": "",
     "id": 1,
@@ -432,12 +593,83 @@ export const EXAMPLES: Record<string, unknown> = {
     "xrayState": "",
     "xrayVersion": "25.10.31"
   },
+  "NodeMutationRequest": {
+    "address": "",
+    "allowPrivateAddress": false,
+    "apiToken": null,
+    "basePath": "",
+    "clearApiToken": false,
+    "enable": false,
+    "id": 0,
+    "inboundSyncMode": "all",
+    "inboundTags": [
+      ""
+    ],
+    "name": "",
+    "outboundTag": "",
+    "pinnedCertSha256": "",
+    "port": 1,
+    "remark": "",
+    "scheme": "http",
+    "tlsVerifyMode": "verify"
+  },
+  "NodeView": {
+    "activeCount": 20,
+    "address": "node.example.com",
+    "allowPrivateAddress": false,
+    "basePath": "/",
+    "clientCount": 25,
+    "configDirty": false,
+    "configDirtyAt": 0,
+    "cpuPct": 12.5,
+    "createdAt": 1700000000,
+    "depletedCount": 1,
+    "disabledCount": 2,
+    "enable": true,
+    "guid": "node-guid",
+    "hasApiToken": true,
+    "id": 1,
+    "inboundCount": 3,
+    "inboundSyncMode": "all",
+    "inboundTags": [
+      "in-443-tcp"
+    ],
+    "lastError": "",
+    "lastHeartbeat": 1700000000,
+    "latencyMs": 42,
+    "memPct": 45.2,
+    "name": "edge-1",
+    "netDown": 1048576,
+    "netUp": 2097152,
+    "onlineCount": 5,
+    "outboundTag": "direct",
+    "panelVersion": "v3.x.x",
+    "parentGuid": "",
+    "pinnedCertSha256": "",
+    "port": 2053,
+    "remark": "Primary edge",
+    "scheme": "https",
+    "status": "online",
+    "tlsVerifyMode": "verify",
+    "transitive": false,
+    "updatedAt": 1700003600,
+    "uptimeSecs": 86400,
+    "xrayError": "",
+    "xrayState": "running",
+    "xrayVersion": "25.10.31"
+  },
   "OutboundTraffics": {
     "down": 0,
     "id": 0,
     "tag": "",
     "total": 0,
     "up": 0
+  },
+  "PanelUpdateStatus": {
+    "exitCode": 0,
+    "finishedAt": 1735689612,
+    "runId": "1735689600123456789",
+    "state": "success"
   },
   "ProbeResultUI": {
     "cpuPct": 12.5,
@@ -450,6 +682,28 @@ export const EXAMPLES: Record<string, unknown> = {
     "xrayError": "",
     "xrayState": "",
     "xrayVersion": "25.10.31"
+  },
+  "RealityScanResult": {
+    "alpn": "h2",
+    "certIssuer": "Google Trust Services",
+    "certSubject": "cloudflare.com",
+    "certValid": true,
+    "curveID": "X25519",
+    "feasible": true,
+    "h2": true,
+    "host": "www.cloudflare.com",
+    "ip": "104.16.124.96",
+    "latencyMs": 180,
+    "notAfter": "2026-08-01T00:00:00Z",
+    "port": 443,
+    "reason": "",
+    "serverNames": [
+      ""
+    ],
+    "target": "www.cloudflare.com:443",
+    "tls13": true,
+    "tlsVersion": "1.3",
+    "x25519": true
   },
   "Setting": {
     "id": 0,

@@ -80,6 +80,9 @@ func hostToExternalProxyMap(h *model.Host, defaultDest string, defaultPort int) 
 	if h.EchConfigList != "" {
 		ep["echConfigList"] = h.EchConfigList
 	}
+	if h.VerifyPeerCertByName != "" {
+		ep["verifyPeerCertByName"] = h.VerifyPeerCertByName
+	}
 	if h.AllowInsecure {
 		ep["allowInsecure"] = true
 	}
@@ -101,6 +104,9 @@ func hostToExternalProxyMap(h *model.Host, defaultDest string, defaultPort int) 
 	if h.FinalMask != "" {
 		ep["finalMask"] = h.FinalMask
 	}
+	if h.VlessRoute != "" {
+		ep["vlessRoute"] = h.VlessRoute
+	}
 	return ep
 }
 
@@ -119,6 +125,20 @@ func hostMuxOverride(ep map[string]any) string {
 // the base stream strips sockopt) and finalMask. No-op for legacy externalProxy
 // entries (which never carry these keys), so existing output is unchanged.
 func applyHostStreamOverrides(ep map[string]any, stream map[string]any) {
+	if hh, ok := ep["hostHeader"].(string); ok && hh != "" {
+		for _, key := range []string{"wsSettings", "httpupgradeSettings", "xhttpSettings"} {
+			if ts, ok := stream[key].(map[string]any); ok && ts != nil {
+				ts["host"] = hh
+			}
+		}
+	}
+	if p, ok := ep["path"].(string); ok && p != "" {
+		for _, key := range []string{"wsSettings", "httpupgradeSettings", "xhttpSettings"} {
+			if ts, ok := stream[key].(map[string]any); ok && ts != nil {
+				ts["path"] = p
+			}
+		}
+	}
 	if sp, ok := ep["sockoptParams"].(string); ok && sp != "" {
 		var sockopt map[string]any
 		if json.Unmarshal([]byte(sp), &sockopt) == nil && len(sockopt) > 0 {
@@ -197,13 +217,15 @@ func (s *SubService) linkFromHosts(inbound *model.Inbound, client model.Client, 
 	if len(eps) == 0 {
 		return ""
 	}
+	stream := unmarshalStreamSettings(inbound.StreamSettings)
+	transport, _ := stream["network"].(string)
 	// Clone each ep before expanding its remark template: the eps slice is
 	// shared across all clients of this inbound, so the rendered (per-client)
 	// remark must not leak into the next client's links.
 	rendered := make([]map[string]any, len(eps))
 	for i, ep := range eps {
 		cp := maps.Clone(ep)
-		s.renderHostRemark(inbound, client, cp)
+		s.renderHostRemark(inbound, client, cp, transport)
 		rendered[i] = cp
 	}
 	clone := *inbound
@@ -216,12 +238,12 @@ func (s *SubService) linkFromHosts(inbound *model.Inbound, client model.Client, 
 // renderers emit it verbatim (via endpointRemark) instead of re-composing it.
 // No-op for non-host endpoints (legacy externalProxy / synthetic default), so
 // their output stays byte-identical.
-func (s *SubService) renderHostRemark(inbound *model.Inbound, client model.Client, ep map[string]any) {
+func (s *SubService) renderHostRemark(inbound *model.Inbound, client model.Client, ep map[string]any, transport string) {
 	if !isHostEndpoint(ep) {
 		return
 	}
 	tmpl, _ := ep["remark"].(string)
-	ep["remark"] = s.genHostRemark(inbound, client, tmpl)
+	ep["remark"] = s.genHostRemark(inbound, client, tmpl, transport)
 	ep["remarkFinal"] = true
 }
 
@@ -229,7 +251,7 @@ func (s *SubService) renderHostRemark(inbound *model.Inbound, client model.Clien
 // entry. A host endpoint whose template was pre-expanded by renderHostRemark
 // carries remarkFinal and is used verbatim; every other entry flows through the
 // standard genRemark composition unchanged.
-func (s *SubService) endpointRemark(inbound *model.Inbound, email string, ep map[string]any) string {
+func (s *SubService) endpointRemark(inbound *model.Inbound, email string, ep map[string]any, transport string) string {
 	if ep != nil {
 		if final, _ := ep["remarkFinal"].(bool); final {
 			r, _ := ep["remark"].(string)
@@ -240,7 +262,7 @@ func (s *SubService) endpointRemark(inbound *model.Inbound, email string, ep map
 	if ep != nil {
 		extra, _ = ep["remark"].(string)
 	}
-	return s.genRemark(inbound, email, extra)
+	return s.genRemark(inbound, email, extra, transport)
 }
 
 // applyEndpointHostPath overrides the transport host header / path for a host
@@ -295,6 +317,44 @@ func applyEndpointAllowInsecure(e ShareEndpoint, params map[string]string, secur
 	if ai, ok := e.ep["allowInsecure"].(bool); ok && ai {
 		params["allowInsecure"] = "1"
 	}
+}
+
+// applyEndpointFinalMask merges a host's Final Mask into the raw link's fm
+// param, mirroring the applyHostStreamOverrides merge on the JSON/Clash path.
+func applyEndpointFinalMask(e ShareEndpoint, params map[string]string) {
+	if merged, ok := endpointFinalMask(e, params["fm"]); ok {
+		params["fm"] = merged
+	}
+}
+
+// applyEndpointFinalMaskObj is applyEndpointFinalMask for the VMess object form.
+func applyEndpointFinalMaskObj(e ShareEndpoint, obj map[string]any) {
+	baseFm, _ := obj["fm"].(string)
+	if merged, ok := endpointFinalMask(e, baseFm); ok {
+		obj["fm"] = merged
+	}
+}
+
+func endpointFinalMask(e ShareEndpoint, baseFm string) (string, bool) {
+	if e.ep == nil {
+		return "", false
+	}
+	fm, ok := e.ep["finalMask"].(string)
+	if !ok || fm == "" {
+		return "", false
+	}
+	var masks map[string]any
+	if json.Unmarshal([]byte(fm), &masks) != nil || len(masks) == 0 {
+		return "", false
+	}
+	var base any
+	if baseFm != "" {
+		var baseMap map[string]any
+		if json.Unmarshal([]byte(baseFm), &baseMap) == nil {
+			base = baseMap
+		}
+	}
+	return marshalFinalMask(mergeFinalMask(base, masks))
 }
 
 // applyEndpointHostPathObj is applyEndpointHostPath for the VMess object form.

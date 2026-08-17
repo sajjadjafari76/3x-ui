@@ -6,16 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/mhsanaei/3x-ui/v3/internal/logger"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service"
 )
@@ -48,65 +51,226 @@ type SUBController struct {
 	subAnnounce      string
 	subEnableRouting bool
 	subRoutingRules  string
-	subPath          string
-	subJsonPath      string
-	subClashPath     string
-	jsonEnabled      bool
-	clashEnabled     bool
-	subEncrypt       bool
-	updateInterval   string
+	subHideSettings  bool
+
+	subIncyEnableRouting bool
+	subIncyRoutingRules  string
+
+	subPath            string
+	subJsonPath        string
+	subClashPath       string
+	subClashAutoDetect bool
+	clashUserAgent     *regexp.Regexp
+	jsonAutoDetect     bool
+	jsonUserAgent      *regexp.Regexp
+	jsonAlwaysArray    bool
+	jsonEnabled        bool
+	clashEnabled       bool
+	subEncrypt         bool
+	updateInterval     string
 
 	subService      *SubService
 	subJsonService  *SubJsonService
 	subClashService *SubClashService
+	clientService   service.ClientService
 	settingService  service.SettingService
 
 	subTemplateMu    sync.RWMutex
 	subTemplateCache map[string]*cachedSubTemplate
 }
 
+type subControllerConfig struct {
+	subPath      string
+	subJsonPath  string
+	subClashPath string
+
+	subClashAutoDetect     bool
+	subClashUserAgentRegex string
+	subJsonAutoDetect      bool
+	subJsonUserAgentRegex  string
+	subJsonAlwaysArray     bool
+	subJsonEnabled         bool
+	subClashEnabled        bool
+
+	subEncrypt     bool
+	remarkTemplate string
+	updateInterval string
+
+	subJsonMux            string
+	subJsonRules          string
+	subJsonFinalMask      string
+	subClashEnableRouting bool
+	subClashRules         string
+
+	subTitle         string
+	subSupportURL    string
+	subProfileURL    string
+	subAnnounce      string
+	subEnableRouting bool
+	subRoutingRules  string
+	subHideSettings  bool
+
+	subIncyEnableRouting bool
+	subIncyRoutingRules  string
+}
+
+type SUBControllerOption func(*subControllerConfig)
+
+func WithSUBPath(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subPath = value }
+}
+
+func WithSUBJsonPath(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonPath = value }
+}
+
+func WithSUBClashPath(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashPath = value }
+}
+
+func WithSUBClashAutoDetect(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashAutoDetect = value }
+}
+
+func WithSUBClashUserAgentRegex(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashUserAgentRegex = value }
+}
+
+func WithSUBJsonAutoDetect(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonAutoDetect = value }
+}
+
+func WithSUBJsonUserAgentRegex(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonUserAgentRegex = value }
+}
+
+func WithSUBJsonAlwaysArray(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonAlwaysArray = value }
+}
+
+func WithSUBJsonEnabled(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonEnabled = value }
+}
+
+func WithSUBClashEnabled(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashEnabled = value }
+}
+
+func WithSUBEncryption(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subEncrypt = value }
+}
+
+func WithSUBRemarkTemplate(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.remarkTemplate = value }
+}
+
+func WithSUBUpdateInterval(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.updateInterval = value }
+}
+
+func WithSUBJsonMux(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonMux = value }
+}
+
+func WithSUBJsonRules(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonRules = value }
+}
+
+func WithSUBJsonFinalMask(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subJsonFinalMask = value }
+}
+
+func WithSUBClashEnableRouting(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashEnableRouting = value }
+}
+
+func WithSUBClashRules(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subClashRules = value }
+}
+
+func WithSUBTitle(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subTitle = value }
+}
+
+func WithSUBSupportURL(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subSupportURL = value }
+}
+
+func WithSUBProfileURL(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subProfileURL = value }
+}
+
+func WithSUBAnnounce(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subAnnounce = value }
+}
+
+func WithSUBEnableRouting(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subEnableRouting = value }
+}
+
+func WithSUBRoutingRules(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subRoutingRules = value }
+}
+
+func WithSUBHideSettings(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subHideSettings = value }
+}
+
+func WithSUBIncyEnableRouting(value bool) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subIncyEnableRouting = value }
+}
+
+func WithSUBIncyRoutingRules(value string) SUBControllerOption {
+	return func(config *subControllerConfig) { config.subIncyRoutingRules = value }
+}
+
+func defaultSUBControllerConfig() subControllerConfig {
+	return subControllerConfig{
+		subPath:        "/sub/",
+		subJsonPath:    "/json/",
+		subClashPath:   "/clash/",
+		subEncrypt:     true,
+		remarkTemplate: service.DefaultRemarkTemplate,
+		updateInterval: "12",
+	}
+}
+
 // NewSUBController creates a new subscription controller with the given configuration.
-func NewSUBController(
-	g *gin.RouterGroup,
-	subPath string,
-	jsonPath string,
-	clashPath string,
-	jsonEnabled bool,
-	clashEnabled bool,
-	encrypt bool,
-	remarkTemplate string,
-	update string,
-	jsonMux string,
-	jsonRules string,
-	jsonFinalMask string,
-	clashEnableRouting bool,
-	clashRules string,
-	subTitle string,
-	subSupportUrl string,
-	subProfileUrl string,
-	subAnnounce string,
-	subEnableRouting bool,
-	subRoutingRules string,
-) *SUBController {
-	sub := NewSubService(remarkTemplate)
+func NewSUBController(g *gin.RouterGroup, options ...SUBControllerOption) *SUBController {
+	config := defaultSUBControllerConfig()
+	for _, option := range options {
+		option(&config)
+	}
+
+	sub := NewSubService(config.remarkTemplate)
 	a := &SUBController{
-		subTitle:         subTitle,
-		subSupportUrl:    subSupportUrl,
-		subProfileUrl:    subProfileUrl,
-		subAnnounce:      subAnnounce,
-		subEnableRouting: subEnableRouting,
-		subRoutingRules:  subRoutingRules,
-		subPath:          subPath,
-		subJsonPath:      jsonPath,
-		subClashPath:     clashPath,
-		jsonEnabled:      jsonEnabled,
-		clashEnabled:     clashEnabled,
-		subEncrypt:       encrypt,
-		updateInterval:   update,
+		subTitle:         config.subTitle,
+		subSupportUrl:    config.subSupportURL,
+		subProfileUrl:    config.subProfileURL,
+		subAnnounce:      config.subAnnounce,
+		subEnableRouting: config.subEnableRouting,
+		subRoutingRules:  config.subRoutingRules,
+		subHideSettings:  config.subHideSettings,
+
+		subIncyEnableRouting: config.subIncyEnableRouting,
+		subIncyRoutingRules:  config.subIncyRoutingRules,
+
+		subPath:            config.subPath,
+		subJsonPath:        config.subJsonPath,
+		subClashPath:       config.subClashPath,
+		subClashAutoDetect: config.subClashAutoDetect,
+		clashUserAgent:     compileUserAgentRegex("Clash/Mihomo", config.subClashUserAgentRegex, service.DefaultSubClashUserAgentRegex),
+		jsonAutoDetect:     config.subJsonAutoDetect,
+		jsonUserAgent:      compileUserAgentRegex("Xray JSON", config.subJsonUserAgentRegex, service.DefaultSubJsonUserAgentRegex),
+		jsonAlwaysArray:    config.subJsonAlwaysArray,
+		jsonEnabled:        config.subJsonEnabled,
+		clashEnabled:       config.subClashEnabled,
+		subEncrypt:         config.subEncrypt,
+		updateInterval:     config.updateInterval,
 
 		subService:      sub,
-		subJsonService:  NewSubJsonService(jsonMux, jsonRules, jsonFinalMask, sub),
-		subClashService: NewSubClashService(clashEnableRouting, clashRules, sub),
+		subJsonService:  NewSubJsonService(config.subJsonMux, config.subJsonRules, config.subJsonFinalMask, sub),
+		subClashService: NewSubClashService(config.subClashEnableRouting, config.subClashRules, sub),
 
 		subTemplateCache: map[string]*cachedSubTemplate{},
 	}
@@ -132,59 +296,204 @@ func (a *SUBController) initRouter(g *gin.RouterGroup) {
 	}
 }
 
-// subs handles HTTP requests for subscription links, returning either HTML page or base64-encoded subscription data.
-func (a *SUBController) subs(c *gin.Context) {
-	subId := c.Param("subid")
-	scheme, host, hostWithPort, hostHeader := a.subService.ResolveRequest(c)
-	subReq := a.subService.ForRequest(host)
-	// The remark template's per-client info is for the content a client app
-	// imports — the raw subscription body. A browser viewing the HTML info page
-	// gets clean, name-only remarks (usage is shown in the page summary).
+// maybeServeSubPage renders the HTML info page when the request comes from a
+// browser (Accept: text/html) or explicitly asks for it (?html=1 or ?view=html).
+// It reports whether the request was handled. The remark template's per-client
+// info is for the content a client app imports — the raw subscription body. A
+// browser viewing the HTML info page gets clean, name-only remarks (usage is
+// shown in the page summary).
+func (a *SUBController) maybeServeSubPage(c *gin.Context) bool {
 	accept := c.GetHeader("Accept")
 	wantsHTML := strings.Contains(strings.ToLower(accept), "text/html") || c.Query("html") == "1" || strings.EqualFold(c.Query("view"), "html")
-	subReq.subscriptionBody = !wantsHTML
+	if !wantsHTML {
+		return false
+	}
+	page, ok := a.buildSubPageData(c)
+	if !ok {
+		return true
+	}
+	a.serveSubPage(c, page.BasePath, page)
+	return true
+}
+
+func (a *SUBController) maybeServeSubInfo(c *gin.Context) bool {
+	if !strings.EqualFold(c.Query("format"), "info") {
+		return false
+	}
+	page, ok := a.buildSubPageData(c)
+	if !ok {
+		return true
+	}
+	info := a.subPageContext(page)
+	delete(info, "links")
+	info["emails"] = dedupeEmails(page.Emails)
+	setNoCacheHeaders(c)
+	c.JSON(http.StatusOK, info)
+	return true
+}
+
+func (a *SUBController) buildSubPageData(c *gin.Context) (PageData, bool) {
+	subId := c.Param("subid")
+	_, host, _, hostHeader := a.subService.ResolveRequest(c)
+	subReq := a.subService.ForRequest(host)
+	subReq.subscriptionBody = false
 	subs, emails, lastOnline, traffic, err := subReq.getSubs(subId)
+	if err != nil || len(subs) == 0 {
+		writeSubError(c, err)
+		return PageData{}, false
+	}
+	subURL, subJsonURL, subClashURL := subReq.BuildURLs(a.subPath, a.subJsonPath, a.subClashPath, subId)
+	if !a.jsonEnabled {
+		subJsonURL = ""
+	}
+	if !a.clashEnabled {
+		subClashURL = ""
+	}
+	basePath, exists := c.Get("base_path")
+	if !exists {
+		basePath = "/"
+	}
+	basePathStr := basePath.(string)
+	metadata := a.metadataForSubRequest(func() *SubService { return subReq }, subId, "")
+	page := subReq.BuildPageData(subId, hostHeader, traffic, lastOnline, subs, emails, subURL, subJsonURL, subClashURL, basePathStr, metadata.Title, metadata.SupportURL)
+	page.SubAnnounce = metadata.Announce
+	return page, true
+}
+
+func dedupeEmails(emails []string) []string {
+	out := make([]string, 0, len(emails))
+	seen := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		if email == "" {
+			continue
+		}
+		if _, dup := seen[email]; dup {
+			continue
+		}
+		seen[email] = struct{}{}
+		out = append(out, email)
+	}
+	return out
+}
+
+// subs handles HTTP requests for subscription links, returning either HTML page or base64-encoded subscription data.
+func (a *SUBController) subs(c *gin.Context) {
+	userAgent := c.GetHeader("User-Agent")
+	if a.maybeServeSubInfo(c) {
+		logSubscriptionRoute(userAgent, "info")
+		return
+	}
+	if a.maybeServeSubPage(c) {
+		logSubscriptionRoute(userAgent, "html")
+		return
+	}
+	if !a.enforceHwid(c) {
+		return
+	}
+	if shouldAutoServeClash(a.subClashAutoDetect, a.clashEnabled, false, userAgent, a.clashUserAgent) && a.serveClashBody(c, false) {
+		a.recordSubscriptionFetch(c)
+		logSubscriptionRoute(userAgent, "clash")
+		return
+	}
+	if shouldAutoServeJson(a.jsonAutoDetect, a.jsonEnabled, false, userAgent, a.jsonUserAgent) && a.serveJsonBody(c, true, "application/json; charset=utf-8", false) {
+		a.recordSubscriptionFetch(c)
+		logSubscriptionRoute(userAgent, "json")
+		return
+	}
+	logSubscriptionRoute(userAgent, "raw")
+	subId := c.Param("subid")
+	scheme, host, hostWithPort, _ := a.subService.ResolveRequest(c)
+	subReq := a.subService.ForRequest(host)
+	subReq.subscriptionBody = true
+	subs, _, _, traffic, err := subReq.getSubs(subId)
 	if err != nil || len(subs) == 0 {
 		writeSubError(c, err)
 	} else {
 		var result strings.Builder
 		for _, sub := range subs {
-			result.WriteString(sub + "\n")
-		}
-
-		// If the request expects HTML (e.g., browser) or explicitly asked (?html=1 or ?view=html), render the info page here
-		if wantsHTML {
-			subURL, subJsonURL, subClashURL := subReq.BuildURLs(a.subPath, a.subJsonPath, a.subClashPath, subId)
-			if !a.jsonEnabled {
-				subJsonURL = ""
-			}
-			if !a.clashEnabled {
-				subClashURL = ""
-			}
-			basePath, exists := c.Get("base_path")
-			if !exists {
-				basePath = "/"
-			}
-			basePathStr := basePath.(string)
-			page := subReq.BuildPageData(subId, hostHeader, traffic, lastOnline, subs, emails, subURL, subJsonURL, subClashURL, basePathStr, a.subTitle, a.subSupportUrl)
-			a.serveSubPage(c, basePathStr, page)
-			return
+			result.WriteString(sub)
+			result.WriteString("\n")
 		}
 
 		// Add headers
 		header := fmt.Sprintf("upload=%d; download=%d; total=%d; expire=%d", traffic.Up, traffic.Down, traffic.Total, traffic.ExpiryTime/1000)
-		profileUrl := a.subProfileUrl
-		if profileUrl == "" {
-			profileUrl = fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
+		profileURL := fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
+		metadata := a.metadataForSubRequest(func() *SubService { return subReq }, subId, profileURL)
+		a.ApplyCommonHeaders(c, header, a.updateInterval, metadata.Title, metadata.SupportURL, metadata.ProfileURL, metadata.Announce, a.subEnableRouting, a.subRoutingRules, a.subHideSettings)
+
+		if a.subIncyEnableRouting && a.subIncyRoutingRules != "" {
+			result.WriteString(a.subIncyRoutingRules)
+			result.WriteString("\n")
 		}
-		a.ApplyCommonHeaders(c, header, a.updateInterval, a.subTitle, a.subSupportUrl, profileUrl, a.subAnnounce, a.subEnableRouting, a.subRoutingRules)
 
 		if a.subEncrypt {
 			c.String(200, base64.StdEncoding.EncodeToString([]byte(result.String())))
 		} else {
 			c.String(200, result.String())
 		}
+		a.recordSubscriptionFetch(c)
 	}
+}
+
+func (a *SUBController) recordSubscriptionFetch(c *gin.Context) {
+	if c.Request == nil || c.Request.Method != http.MethodGet || c.Writer.Status() != http.StatusOK {
+		return
+	}
+	if err := a.subService.RecordSubscriptionFetch(c.Param("subid")); err != nil {
+		logger.Warning("Failed to record subscription fetch:", err)
+	}
+}
+
+func shouldAutoServeClash(autoDetect, clashEnabled, wantsHTML bool, userAgent string, userAgentRegex *regexp.Regexp) bool {
+	return shouldAutoServeFormat(autoDetect, clashEnabled, wantsHTML, userAgent, userAgentRegex)
+}
+
+func shouldAutoServeJson(autoDetect, jsonEnabled, wantsHTML bool, userAgent string, userAgentRegex *regexp.Regexp) bool {
+	return shouldAutoServeFormat(autoDetect, jsonEnabled, wantsHTML, userAgent, userAgentRegex)
+}
+
+func shouldAutoServeFormat(autoDetect, formatEnabled, wantsHTML bool, userAgent string, userAgentRegex *regexp.Regexp) bool {
+	if !autoDetect || !formatEnabled || wantsHTML || userAgentRegex == nil {
+		return false
+	}
+	return userAgentRegex.MatchString(userAgent)
+}
+
+func logSubscriptionRoute(userAgent, branch string) {
+	logger.Debugf("Subscription request routed: branch=%s user_agent=%q", branch, sanitizeUserAgentForLog(userAgent))
+}
+
+func sanitizeUserAgentForLog(userAgent string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, userAgent)
+	runes := []rune(clean)
+	if len(runes) > 512 {
+		return string(runes[:512])
+	}
+	return clean
+}
+
+func compileUserAgentRegex(name, pattern, defaultPattern string) *regexp.Regexp {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		pattern = strings.TrimSpace(defaultPattern)
+	}
+	if pattern == "" {
+		return nil
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err == nil {
+		return compiled
+	}
+	logger.Warningf("Invalid %s User-Agent regex %q; falling back to default %q: %v", name, pattern, defaultPattern, err)
+	if strings.TrimSpace(defaultPattern) == "" {
+		return nil
+	}
+	return regexp.MustCompile(defaultPattern)
 }
 
 // serveSubPage renders internal/web/dist/subpage.html for the current subscription
@@ -197,7 +506,7 @@ func (a *SUBController) serveSubPage(c *gin.Context, basePath string, page PageD
 	if diskBody, diskErr := os.ReadFile("internal/web/dist/subpage.html"); diskErr == nil {
 		body = diskBody
 	} else {
-		readBody, err := distFS.ReadFile("dist/subpage.html")
+		readBody, err := fs.ReadFile(distFS, "dist/subpage.html")
 		if err != nil {
 			c.String(http.StatusInternalServerError, "missing embedded subpage")
 			return
@@ -214,37 +523,7 @@ func (a *SUBController) serveSubPage(c *gin.Context, basePath string, page PageD
 		body = bytes.ReplaceAll(body, []byte(`href="/assets/`), []byte(`href="`+basePath+`assets/`))
 	}
 
-	// JSON-marshal the view-model so the SPA can read it as a plain
-	// The panel's "Calendar Type" setting decides whether the SubPage
-	// renders dates in Gregorian or Jalali — surface it here so the SPA
-	// can match the rest of the panel without a round-trip.
-	datepicker, _ := a.settingService.GetDatepicker()
-	if datepicker == "" {
-		datepicker = "gregorian"
-	}
-
-	subData := map[string]any{
-		"sId":           page.SId,
-		"enabled":       page.Enabled,
-		"download":      page.Download,
-		"upload":        page.Upload,
-		"total":         page.Total,
-		"used":          page.Used,
-		"remained":      page.Remained,
-		"expire":        page.Expire,
-		"lastOnline":    page.LastOnline,
-		"downloadByte":  page.DownloadByte,
-		"uploadByte":    page.UploadByte,
-		"totalByte":     page.TotalByte,
-		"subUrl":        page.SubUrl,
-		"subJsonUrl":    page.SubJsonUrl,
-		"subClashUrl":   page.SubClashUrl,
-		"subTitle":      page.SubTitle,
-		"subSupportUrl": page.SubSupportUrl,
-		"links":         page.Result,
-		"emails":        page.Emails,
-		"datepicker":    datepicker,
-	}
+	subData := a.subPageContext(page)
 
 	// When an admin has configured a custom subscription theme, render it
 	// instead of the default SPA. We render into a buffer first so a template
@@ -291,6 +570,78 @@ func (a *SUBController) serveSubPage(c *gin.Context, basePath string, page PageD
 
 	setNoCacheHeaders(c)
 	c.Data(http.StatusOK, "text/html; charset=utf-8", out)
+}
+
+// subPageContext builds the shared view-model map: the template context for
+// custom sub themes, the window.__SUB_PAGE_DATA__ payload the SPA reads, and
+// (without links) the ?format=info JSON body. The panel's "Calendar Type"
+// setting decides whether dates render Gregorian or Jalali — surfaced here so
+// consumers match the rest of the panel without a round-trip.
+func (a *SUBController) subPageContext(page PageData) map[string]any {
+	datepicker, _ := a.settingService.GetDatepicker()
+	if datepicker == "" {
+		datepicker = "gregorian"
+	}
+
+	return map[string]any{
+		"sId":           page.SId,
+		"enabled":       page.Enabled,
+		"isOnline":      page.IsOnline,
+		"download":      page.Download,
+		"upload":        page.Upload,
+		"total":         page.Total,
+		"used":          page.Used,
+		"remained":      page.Remained,
+		"expire":        page.Expire,
+		"lastOnline":    page.LastOnline,
+		"downloadByte":  page.DownloadByte,
+		"uploadByte":    page.UploadByte,
+		"totalByte":     page.TotalByte,
+		"subUrl":        page.SubUrl,
+		"subJsonUrl":    page.SubJsonUrl,
+		"subClashUrl":   page.SubClashUrl,
+		"subTitle":      page.SubTitle,
+		"subSupportUrl": page.SubSupportUrl,
+		"links":         page.Result,
+		"emails":        page.Emails,
+		"datepicker":    datepicker,
+		"announce":      page.SubAnnounce,
+	}
+}
+
+func (a *SUBController) enforceHwid(c *gin.Context) bool {
+	result, err := a.clientService.EnforceHwidForSubID(c.Param("subid"), service.HwidRequest{
+		Hwid:        c.GetHeader("X-HWID"),
+		UserAgent:   c.GetHeader("User-Agent"),
+		DeviceOS:    c.GetHeader("X-Device-OS"),
+		OsVersion:   c.GetHeader("X-Ver-OS"),
+		DeviceModel: c.GetHeader("X-Device-Model"),
+	})
+	if err != nil {
+		writeSubError(c, err)
+		return false
+	}
+	applyHwidHeaders(c, result)
+	if !result.Allowed {
+		c.Status(http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
+func applyHwidHeaders(c *gin.Context, result service.HwidGateResult) {
+	if result.Active {
+		c.Header("X-Hwid-Active", "true")
+	}
+	if result.NotSupported {
+		c.Header("X-Hwid-Not-Supported", "true")
+	}
+	if result.LimitReached {
+		c.Header("X-Hwid-Limit", "true")
+	}
+	if result.MaxDevicesReached {
+		c.Header("X-Hwid-Max-Devices-Reached", "true")
+	}
 }
 
 // setNoCacheHeaders marks a subscription page response as non-cacheable so VPN
@@ -346,40 +697,105 @@ func (a *SUBController) loadSubTemplate(themeDir string) (*template.Template, er
 
 // subJsons handles HTTP requests for JSON subscription configurations.
 func (a *SUBController) subJsons(c *gin.Context) {
+	if strings.EqualFold(c.Query("view"), "raw") {
+		if !a.serveJsonBody(c, a.jsonAlwaysArray, "application/json; charset=utf-8", true) {
+			writeSubError(c, nil)
+		}
+		a.recordSubscriptionFetch(c)
+		return
+	}
+	if a.maybeServeSubPage(c) {
+		return
+	}
+	if !a.enforceHwid(c) {
+		return
+	}
+	a.serveJson(c, a.jsonAlwaysArray, "text/plain; charset=utf-8")
+}
+
+func (a *SUBController) serveJson(c *gin.Context, alwaysReturnArray bool, contentType string) {
+	if !a.serveJsonBody(c, alwaysReturnArray, contentType, false) {
+		writeSubError(c, nil)
+	}
+	a.recordSubscriptionFetch(c)
+}
+
+func (a *SUBController) serveJsonBody(c *gin.Context, alwaysReturnArray bool, contentType string, rawDownload bool) bool {
 	subId := c.Param("subid")
 	scheme, host, hostWithPort, _ := a.subService.ResolveRequest(c)
-	jsonSub, header, err := a.subJsonService.GetJson(subId, host)
-	if err != nil || len(jsonSub) == 0 {
+	jsonSub, header, err := a.subJsonService.GetJson(subId, host, alwaysReturnArray)
+	if err != nil {
 		writeSubError(c, err)
-	} else {
-		profileUrl := a.subProfileUrl
-		if profileUrl == "" {
-			profileUrl = fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
-		}
-		a.ApplyCommonHeaders(c, header, a.updateInterval, a.subTitle, a.subSupportUrl, profileUrl, a.subAnnounce, a.subEnableRouting, a.subRoutingRules)
-
-		c.String(200, jsonSub)
+		return true
 	}
+	if len(jsonSub) == 0 {
+		return false
+	}
+	profileURL := fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
+	var subReq *SubService
+	metadata := a.metadataForSubRequest(func() *SubService {
+		if subReq == nil {
+			subReq = a.subService.ForRequest(host)
+		}
+		return subReq
+	}, subId, profileURL)
+	a.ApplyCommonHeaders(c, header, a.updateInterval, metadata.Title, metadata.SupportURL, metadata.ProfileURL, metadata.Announce, a.subEnableRouting, a.subRoutingRules, a.subHideSettings)
+	if rawDownload {
+		c.Writer.Header().Set("Content-Disposition", `attachment; filename="subscription.json"`)
+	}
+
+	c.Data(200, contentType, []byte(jsonSub))
+	return true
 }
 
 func (a *SUBController) subClashs(c *gin.Context) {
+	if strings.EqualFold(c.Query("view"), "raw") {
+		if !a.serveClashBody(c, true) {
+			writeSubError(c, nil)
+		}
+		a.recordSubscriptionFetch(c)
+		return
+	}
+	if a.maybeServeSubPage(c) {
+		return
+	}
+	if !a.enforceHwid(c) {
+		return
+	}
+	if !a.serveClashBody(c, false) {
+		writeSubError(c, nil)
+	}
+	a.recordSubscriptionFetch(c)
+}
+
+func (a *SUBController) serveClashBody(c *gin.Context, rawDownload bool) bool {
 	subId := c.Param("subid")
 	scheme, host, hostWithPort, _ := a.subService.ResolveRequest(c)
 	clashSub, header, err := a.subClashService.GetClash(subId, host)
-	if err != nil || len(clashSub) == 0 {
+	if err != nil {
 		writeSubError(c, err)
-	} else {
-		profileUrl := a.subProfileUrl
-		if profileUrl == "" {
-			profileUrl = fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
-		}
-		a.ApplyCommonHeaders(c, header, a.updateInterval, a.subTitle, a.subSupportUrl, profileUrl, a.subAnnounce, a.subEnableRouting, a.subRoutingRules)
-		if a.subTitle != "" {
-			// Clash clients commonly use Content-Disposition to choose the imported profile name.
-			c.Writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(a.subTitle)))
-		}
-		c.Data(200, "application/yaml; charset=utf-8", []byte(clashSub))
+		return true
 	}
+	if len(clashSub) == 0 {
+		return false
+	}
+	profileURL := fmt.Sprintf("%s://%s%s", scheme, hostWithPort, c.Request.RequestURI)
+	var subReq *SubService
+	metadata := a.metadataForSubRequest(func() *SubService {
+		if subReq == nil {
+			subReq = a.subService.ForRequest(host)
+		}
+		return subReq
+	}, subId, profileURL)
+	a.ApplyCommonHeaders(c, header, a.updateInterval, metadata.Title, metadata.SupportURL, metadata.ProfileURL, metadata.Announce, a.subEnableRouting, a.subRoutingRules, a.subHideSettings)
+	if rawDownload {
+		c.Writer.Header().Set("Content-Disposition", `attachment; filename="subscription.yaml"`)
+	} else if metadata.Title != "" {
+		// Clash clients commonly use Content-Disposition to choose the imported profile name.
+		c.Writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(metadata.Title)))
+	}
+	c.Data(200, "application/yaml; charset=utf-8", []byte(clashSub))
+	return true
 }
 
 // ApplyCommonHeaders sets common HTTP headers for subscription responses including user info, update interval, and profile title.
@@ -393,11 +809,12 @@ func (a *SUBController) ApplyCommonHeaders(
 	profileAnnounce string,
 	profileEnableRouting bool,
 	profileRoutingRules string,
+	profileHideSettings bool,
 ) {
 	c.Writer.Header().Set("Subscription-Userinfo", header)
 	c.Writer.Header().Set("Profile-Update-Interval", updateInterval)
 
-	//Basics
+	// Basics
 	if profileTitle != "" {
 		c.Writer.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte(profileTitle)))
 	}
@@ -411,9 +828,14 @@ func (a *SUBController) ApplyCommonHeaders(
 		c.Writer.Header().Set("Announce", "base64:"+base64.StdEncoding.EncodeToString([]byte(profileAnnounce)))
 	}
 
-	//Advanced (Happ)
-	c.Writer.Header().Set("Routing-Enable", strconv.FormatBool(profileEnableRouting))
+	// Advanced (Happ)
+	if profileEnableRouting {
+		c.Writer.Header().Set("Routing-Enable", "true")
+	}
 	if profileRoutingRules != "" {
 		c.Writer.Header().Set("Routing", profileRoutingRules)
+	}
+	if profileHideSettings {
+		c.Writer.Header().Set("Hide-Settings", "1")
 	}
 }

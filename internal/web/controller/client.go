@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -47,6 +48,7 @@ func (a *ClientController) initRouter(g *gin.RouterGroup) {
 	g.GET("/list", a.list)
 	g.GET("/list/paged", a.listPaged)
 	g.GET("/get/:email", a.get)
+	g.GET("/get/tgId/:tgId", a.getByTgId)
 	g.GET("/traffic/:email", a.getTrafficByEmail)
 	g.GET("/subLinks/:subId", a.getSubLinks)
 	g.GET("/links/:email", a.getClientLinks)
@@ -57,9 +59,14 @@ func (a *ClientController) initRouter(g *gin.RouterGroup) {
 	g.POST("/:email/attach", a.attach)
 	g.POST("/:email/detach", a.detach)
 	g.POST("/:email/externalLinks", a.setExternalLinks)
+	g.GET("/export", a.export)
+	g.POST("/import", a.importClients)
+	g.POST("/delOrphans", a.delOrphans)
 	g.POST("/resetAllTraffics", a.resetAllTraffics)
 	g.POST("/delDepleted", a.delDepleted)
 	g.POST("/bulkAdjust", a.bulkAdjust)
+	g.POST("/bulkEnable", a.bulkEnable)
+	g.POST("/bulkDisable", a.bulkDisable)
 	g.POST("/bulkDel", a.bulkDelete)
 	g.POST("/bulkCreate", a.bulkCreate)
 	g.POST("/bulkAttach", a.bulkAttach)
@@ -69,6 +76,8 @@ func (a *ClientController) initRouter(g *gin.RouterGroup) {
 	g.POST("/updateTraffic/:email", a.updateTrafficByEmail)
 	g.POST("/ips/:email", a.getIps)
 	g.POST("/clearIps/:email", a.clearIps)
+	g.POST("/hwids/:email", a.getHwids)
+	g.DELETE("/hwids/:email", a.clearHwids)
 	g.POST("/onlines", a.onlines)
 	g.POST("/onlinesByGuid", a.onlinesByGuid)
 	g.POST("/clientIpsByGuid", a.clientIpsByGuid)
@@ -99,37 +108,69 @@ func (a *ClientController) listPaged(c *gin.Context) {
 	jsonObj(c, resp, nil)
 }
 
+func (a *ClientController) buildClientPayload(rec *model.ClientRecord) (gin.H, error) {
+	inboundIds, err := a.clientService.GetInboundIdsForRecord(rec.Id)
+	if err != nil {
+		return nil, err
+	}
+	externalLinks, err := a.clientService.GetExternalLinksForRecord(rec.Id)
+	if err != nil {
+		return nil, err
+	}
+	flow, err := a.clientService.EffectiveFlow(nil, rec.Id)
+	if err != nil {
+		return nil, err
+	}
+	rec.Flow = flow
+	var usedTraffic int64
+	if t, tErr := a.inboundService.GetClientTrafficByEmail(rec.Email); tErr == nil && t != nil {
+		usedTraffic = t.Up + t.Down
+	}
+	return gin.H{
+		"client":        rec,
+		"inboundIds":    inboundIds,
+		"externalLinks": externalLinks,
+		"usedTraffic":   usedTraffic,
+	}, nil
+}
+
 func (a *ClientController) get(c *gin.Context) {
 	email := c.Param("email")
 	rec, err := a.clientService.GetRecordByEmail(nil, email)
 	if err != nil {
-		jsonMsg(c, I18nWeb(c, "get"), err)
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.obtain"), err)
 		return
 	}
-	inboundIds, err := a.clientService.GetInboundIdsForRecord(rec.Id)
+	payload, err := a.buildClientPayload(rec)
 	if err != nil {
-		jsonMsg(c, I18nWeb(c, "get"), err)
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.obtain"), err)
 		return
 	}
-	externalLinks, err := a.clientService.GetExternalLinksForRecord(rec.Id)
+	jsonObj(c, payload, nil)
+}
+
+func (a *ClientController) getByTgId(c *gin.Context) {
+	tgIdStr := c.Param("tgId")
+	tgId, err := strconv.ParseInt(tgIdStr, 10, 64)
 	if err != nil {
-		jsonMsg(c, I18nWeb(c, "get"), err)
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.obtain"), err)
 		return
 	}
-	flow, err := a.clientService.EffectiveFlow(nil, rec.Id)
+	records, err := a.clientService.GetRecordsByTgID(tgId)
 	if err != nil {
-		jsonMsg(c, I18nWeb(c, "get"), err)
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.obtain"), err)
 		return
 	}
-	rec.Flow = flow
-	// Consumed bytes (up+down, including cross-node global overlay) so API
-	// consumers can pair usage with the client's totalGB quota (#4973).
-	// Best-effort: a traffic lookup failure must not break the client fetch.
-	var usedTraffic int64
-	if t, tErr := a.inboundService.GetClientTrafficByEmail(email); tErr == nil && t != nil {
-		usedTraffic = t.Up + t.Down
+	results := make([]gin.H, 0, len(records))
+	for _, rec := range records {
+		payload, err := a.buildClientPayload(rec)
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "get"), err)
+			return
+		}
+		results = append(results, payload)
 	}
-	jsonObj(c, gin.H{"client": rec, "inboundIds": inboundIds, "externalLinks": externalLinks, "usedTraffic": usedTraffic}, nil)
+	jsonObj(c, results, nil)
 }
 
 func (a *ClientController) create(c *gin.Context) {
@@ -152,13 +193,16 @@ func (a *ClientController) create(c *gin.Context) {
 
 func (a *ClientController) update(c *gin.Context) {
 	email := c.Param("email")
-	var updated model.Client
-	if err := c.ShouldBindJSON(&updated); err != nil {
+	var req struct {
+		model.Client
+		LimitHwid int `json:"limitHwid"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	inboundFilter := parseInboundIdsQuery(c.Query("inboundIds"))
-	needRestart, err := a.clientService.UpdateByEmail(&a.inboundService, email, updated, inboundFilter...)
+	needRestart, err := a.clientService.UpdateByEmail(&a.inboundService, email, req.Client, req.LimitHwid, inboundFilter...)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
@@ -244,6 +288,7 @@ type bulkAdjustRequest struct {
 	Emails   []string `json:"emails"`
 	AddDays  int      `json:"addDays"`
 	AddBytes int64    `json:"addBytes"`
+	Flow     string   `json:"flow"`
 }
 
 func (a *ClientController) bulkAdjust(c *gin.Context) {
@@ -252,7 +297,7 @@ func (a *ClientController) bulkAdjust(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
-	result, needRestart, err := a.clientService.BulkAdjust(&a.inboundService, req.Emails, req.AddDays, req.AddBytes)
+	result, needRestart, err := a.clientService.BulkAdjust(&a.inboundService, req.Emails, req.AddDays, req.AddBytes, req.Flow)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
@@ -333,6 +378,36 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 	notifyClientsChanged()
 }
 
+type bulkEnableRequest struct {
+	Emails []string `json:"emails"`
+}
+
+func (a *ClientController) bulkEnable(c *gin.Context) {
+	a.bulkSetEnable(c, true)
+}
+
+func (a *ClientController) bulkDisable(c *gin.Context) {
+	a.bulkSetEnable(c, false)
+}
+
+func (a *ClientController) bulkSetEnable(c *gin.Context, enable bool) {
+	var req bulkEnableRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	result, needRestart, err := a.clientService.BulkSetEnable(&a.inboundService, req.Emails, enable)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, result, nil)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	notifyClientsChanged()
+}
+
 func (a *ClientController) bulkCreate(c *gin.Context) {
 	var payloads []service.ClientCreatePayload
 	if err := c.ShouldBindJSON(&payloads); err != nil {
@@ -361,6 +436,58 @@ func (a *ClientController) delDepleted(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
+	notifyClientsChanged()
+}
+
+// export returns every client as a {client, inboundIds} list in the standard
+// envelope. The frontend renders it in a read-only CodeMirror viewer (Copy /
+// Download), so this hands back data rather than streaming a file attachment.
+func (a *ClientController) export(c *gin.Context) {
+	items, err := a.clientService.ExportAll()
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, items, nil)
+}
+
+type importClientsRequest struct {
+	Data string `json:"data"`
+}
+
+// importClients accepts the pasted export text as a JSON body { "data": "..." },
+// mirroring the inbound import flow. The data string is itself a JSON-encoded
+// []ClientCreatePayload, so it is unmarshalled in a second step.
+func (a *ClientController) importClients(c *gin.Context) {
+	var req importClientsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	var items []service.ClientCreatePayload
+	if err := json.Unmarshal([]byte(req.Data), &items); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	result, needRestart, err := a.clientService.ImportClients(&a.inboundService, items)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, result, nil)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	notifyClientsChanged()
+}
+
+func (a *ClientController) delOrphans(c *gin.Context) {
+	deleted, err := a.clientService.DeleteOrphans()
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, gin.H{"deleted": deleted}, nil)
 	notifyClientsChanged()
 }
 
@@ -412,6 +539,19 @@ func (a *ClientController) clientIpsByGuid(c *gin.Context) {
 func (a *ClientController) clearIps(c *gin.Context) {
 	email := c.Param("email")
 	if err := a.inboundService.ClearClientIps(email); err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.updateSuccess"), err)
+		return
+	}
+	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.logCleanSuccess"), nil)
+}
+
+func (a *ClientController) getHwids(c *gin.Context) {
+	infos, err := a.clientService.ListClientHwids(c.Param("email"))
+	jsonObj(c, infos, err)
+}
+
+func (a *ClientController) clearHwids(c *gin.Context) {
+	if err := a.clientService.ClearClientHwids(c.Param("email")); err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.updateSuccess"), err)
 		return
 	}

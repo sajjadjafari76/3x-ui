@@ -65,6 +65,7 @@ func run(root, outDir string) error {
 				"Msg",
 				"AllSetting",
 				"AllSettingView",
+				"HostGroup",
 			),
 		},
 		{
@@ -74,15 +75,30 @@ func run(root, outDir string) error {
 			),
 		},
 		{
+			Path: resolveRel(root, "internal/xray/geodata"),
+			StructAllow: setOf(
+				"GeoFile",
+				"GeoCategory",
+				"GeoEntry",
+				"GeoCategoryPage",
+				"GeoEntryPage",
+			),
+			AliasAllow: setOf("GeoKind"),
+		},
+		{
 			Path: resolveRel(root, "internal/web/service"),
 			StructAllow: setOf(
 				"InboundOption",
+				"NodeMutationRequest",
+				"NodeView",
 				"ProbeResultUI",
+				"RealityScanResult",
+				"GeodataTokenIssue",
 			),
 		},
 		{
 			Path:        resolveRel(root, "internal/web/service/panel"),
-			StructAllow: setOf("ApiTokenView"),
+			StructAllow: setOf("ApiTokenView", "PanelUpdateStatus"),
 		},
 	}
 

@@ -21,6 +21,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v3/internal/logger"
 	"github.com/mhsanaei/3x-ui/v3/internal/mtproto"
 	"github.com/mhsanaei/3x-ui/v3/internal/util/common"
+	"github.com/mhsanaei/3x-ui/v3/internal/util/sys"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/controller"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/job"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/locale"
@@ -52,6 +53,12 @@ var i18nFS embed.FS
 var distFS embed.FS
 
 var startTime = time.Now()
+
+// cronPanicLogger adapts the package logger to cron's Printf-style logger so a
+// panicking scheduled job is recovered and logged instead of crashing the panel.
+type cronPanicLogger struct{}
+
+func (cronPanicLogger) Printf(format string, args ...any) { logger.Errorf(format, args...) }
 
 // wrapDistFS adapts the embedded `dist/` directory so it can be mounted
 // as the panel's `/assets/` static route. Vite emits its bundled JS/CSS
@@ -161,9 +168,9 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	// Cap request bodies on state-changing requests so a stolen session/API
 	// token or a buggy client can't force large allocations or long DB
 	// transactions via bulk create/attach/import endpoints. GET/HEAD/OPTIONS
-	// carry no body and are left untouched. importDB restores a full SQLite
-	// backup that legitimately exceeds the cap, so it's exempt. Follow-up: make
-	// the limit a setting.
+	// carry no body and are left untouched. Database restore legitimately accepts
+	// large backups and streams them to disk, so only its exact route suffix is
+	// exempt. Follow-up: make the limit a setting.
 	const maxRequestBodyBytes = 10 << 20 // 10 MiB
 	engine.Use(middleware.MaxBodyBytes(maxRequestBodyBytes, "/panel/api/server/importDB"))
 
@@ -240,7 +247,6 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 
 	s.index = controller.NewIndexController(g)
 	s.panel = controller.NewXUIController(g)
-	g.GET("/panel/api/openapi.json", controller.ServeOpenAPISpec)
 	s.api = controller.NewAPIController(g)
 
 	// Initialize WebSocket hub
@@ -258,8 +264,12 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{})
 	})
 
-	// Add a catch-all route to handle undefined paths and return 404
+	// Let unknown panel document routes fall back to the SPA shell, while every
+	// non-SPA miss still returns a hard 404.
 	engine.NoRoute(func(c *gin.Context) {
+		if s.panel.HandleNoRoutePanelSPA(c) {
+			return
+		}
 		c.AbortWithStatus(http.StatusNotFound)
 	})
 
@@ -281,15 +291,18 @@ const (
 	cadenceNodeHeartbeat = "@every 5s"
 	cadenceNodeTraffic   = "@every 5s"
 	cadenceOutboundSub   = "@every 5m"
+	cadenceReapOrphans   = "@every 5m"
+	cadenceXrayLogPrune  = "@every 10m"
 	cadenceCheckHash     = "@every 2m"
 	// cpu.Percent samples over a full minute (blocking), so a finer cadence just
 	// stacks overlapping samplers; subscribers rate-limit alerts to 1/min anyway.
-	cadenceCPUAlarm = "@every 1m"
+	cadenceCPUAlarm    = "@every 1m"
+	cadenceMemoryAlarm = "@every 1m"
 )
 
 // startTask schedules background jobs (Xray checks, traffic jobs, cron
 // jobs) which the panel relies on for periodic maintenance and monitoring.
-func (s *Server) startTask(restartXray bool) {
+func (s *Server) startTask(restartXray bool, loc *time.Location) {
 	if restartXray {
 		err := s.xrayService.RestartXray(true)
 		if err != nil {
@@ -297,51 +310,49 @@ func (s *Server) startTask(restartXray bool) {
 		}
 	}
 	// Check whether xray is running every second
-	s.cron.AddJob(cadenceXrayRunning, job.NewCheckXrayRunningJob())
+	_, _ = s.cron.AddJob(cadenceXrayRunning, job.NewCheckXrayRunningJob())
 
 	// Check if xray needs to be restarted every 30 seconds
-	s.cron.AddFunc(cadenceXrayRestart, func() {
-		if s.xrayService.IsNeedRestartAndSetFalse() {
-			err := s.xrayService.RestartXray(false)
-			if err != nil {
-				logger.Error("restart xray failed:", err)
-			}
-		}
+	_, _ = s.cron.AddFunc(cadenceXrayRestart, func() {
+		s.xrayService.ApplyPendingRestart()
 	})
 
 	go func() {
 		time.Sleep(time.Second * 5)
-		s.cron.AddJob(cadenceXrayTraffic, job.NewXrayTrafficJob())
+		_, _ = s.cron.AddJob(cadenceXrayTraffic, job.NewXrayTrafficJob())
 	}()
 
 	// Reconcile mtproto (mtg) sidecars and scrape their traffic
 	mtJob := job.NewMtprotoJob()
-	s.cron.AddJob(cadenceMtproto, mtJob)
+	_, _ = s.cron.AddJob(cadenceMtproto, mtJob)
 	go mtJob.Run()
 
 	// check client ips from log file every 10 sec
-	s.cron.AddJob(cadenceClientIPScan, job.NewCheckClientIpJob())
+	_, _ = s.cron.AddJob(cadenceClientIPScan, job.NewCheckClientIpJob())
 
-	s.cron.AddJob(cadenceNodeHeartbeat, job.NewNodeHeartbeatJob())
+	_, _ = s.cron.AddJob(cadenceNodeHeartbeat, job.NewNodeHeartbeatJob())
 
-	s.cron.AddJob(cadenceNodeTraffic, job.NewNodeTrafficSyncJob())
+	_, _ = s.cron.AddJob(cadenceNodeTraffic, job.NewNodeTrafficSyncJob())
 
 	// Outbound subscription auto-refresh (respects per-sub updateInterval)
-	s.cron.AddJob(cadenceOutboundSub, job.NewOutboundSubscriptionJob())
+	_, _ = s.cron.AddJob(cadenceOutboundSub, job.NewOutboundSubscriptionJob())
+
+	_, _ = s.cron.AddJob(cadenceReapOrphans, job.NewReapSyncOrphansJob())
 
 	// check client ips from log file every day
-	s.cron.AddJob("@daily", job.NewClearLogsJob())
-	s.cron.AddJob("@hourly", job.NewWarpIpJob())
+	_, _ = s.cron.AddJob("@daily", job.NewClearLogsJob())
+	_, _ = s.cron.AddJob(cadenceXrayLogPrune, job.NewPruneXrayLogsJob())
+	_, _ = s.cron.AddJob("@hourly", job.NewWarpIpJob())
 
 	// Inbound traffic reset jobs
 	// Run every hour
-	s.cron.AddJob("@hourly", job.NewPeriodicTrafficResetJob("hourly"))
+	_, _ = s.cron.AddJob("@hourly", job.NewPeriodicTrafficResetJob("hourly", loc))
 	// Run once a day, midnight
-	s.cron.AddJob("@daily", job.NewPeriodicTrafficResetJob("daily"))
+	_, _ = s.cron.AddJob("@daily", job.NewPeriodicTrafficResetJob("daily", loc))
 	// Run once a week, midnight between Sat/Sun
-	s.cron.AddJob("@weekly", job.NewPeriodicTrafficResetJob("weekly"))
-	// Run once a month, midnight, first of month
-	s.cron.AddJob("@monthly", job.NewPeriodicTrafficResetJob("monthly"))
+	_, _ = s.cron.AddJob("@weekly", job.NewPeriodicTrafficResetJob("weekly", loc))
+	// Check monthly reset days at midnight
+	_, _ = s.cron.AddJob("@daily", job.NewPeriodicTrafficResetJob("monthly", loc))
 
 	// LDAP sync scheduling
 	if ldapEnabled, _ := s.settingService.GetLdapEnable(); ldapEnabled {
@@ -351,7 +362,7 @@ func (s *Server) startTask(restartXray bool) {
 		}
 		j := job.NewLdapSyncJob()
 		// job has zero-value services with method receivers that read settings on demand
-		s.cron.AddJob(runtime, j)
+		_, _ = s.cron.AddJob(runtime, j)
 	}
 
 	// Telegram-bot–dependent jobs: periodic stats report + callback-hash cleanup.
@@ -371,13 +382,25 @@ func (s *Server) startTask(restartXray bool) {
 		}
 
 		// check for Telegram bot callback query hash storage reset
-		s.cron.AddJob(cadenceCheckHash, job.NewCheckHashStorageJob())
+		_, _ = s.cron.AddJob(cadenceCheckHash, job.NewCheckHashStorageJob())
 	}
 
 	// CPU monitor publishes cpu.high events; register it whenever any notifier
 	// (Telegram or Email) wants them, independent of the Telegram bot being on.
 	if s.cpuAlarmWanted() {
-		s.cron.AddJob(cadenceCPUAlarm, job.NewCheckCpuJob())
+		_, _ = s.cron.AddJob(cadenceCPUAlarm, job.NewCheckCpuJob())
+	}
+	// Memory monitor publishes memory.high events; register it whenever any notifier wants them.
+	if s.memoryAlarmWanted() {
+		_, _ = s.cron.AddJob(cadenceMemoryAlarm, job.NewCheckMemJob())
+	}
+
+	if mins := sys.MemoryReleaseIntervalMinutes(); mins > 0 {
+		_, _ = s.cron.AddJob(fmt.Sprintf("@every %dm", mins), job.NewMemoryReleaseJob())
+		go func() {
+			time.Sleep(time.Minute)
+			job.NewMemoryReleaseJob().Run()
+		}()
 	}
 }
 
@@ -412,6 +435,36 @@ func (s *Server) cpuAlarmWanted() bool {
 	return false
 }
 
+// memoryAlarmWanted reports whether any notifier is configured to receive memory.high alerts.
+func (s *Server) memoryAlarmWanted() bool {
+	wants := func(events string, threshold int) bool {
+		if threshold <= 0 {
+			return false
+		}
+		for e := range strings.SplitSeq(events, ",") {
+			if strings.TrimSpace(e) == string(eventbus.EventMemoryHigh) {
+				return true
+			}
+		}
+		return false
+	}
+	if on, _ := s.settingService.GetTgbotEnabled(); on {
+		events, _ := s.settingService.GetTgEnabledEvents()
+		mem, _ := s.settingService.GetTgMemory()
+		if wants(events, mem) {
+			return true
+		}
+	}
+	if on, _ := s.settingService.GetSmtpEnable(); on {
+		events, _ := s.settingService.GetSmtpEnabledEvents()
+		mem, _ := s.settingService.GetSmtpMemory()
+		if wants(events, mem) {
+			return true
+		}
+	}
+	return false
+}
+
 // Start initializes and starts the web server with configured settings, routes, and background jobs.
 func (s *Server) Start() (err error) {
 	return s.start(true, true)
@@ -425,7 +478,7 @@ func (s *Server) start(restartXray bool, startTgBot bool) (err error) {
 	// This is an anonymous function, no function name
 	defer func() {
 		if err != nil {
-			s.Stop()
+			_ = s.Stop()
 		}
 	}()
 
@@ -435,7 +488,19 @@ func (s *Server) start(restartXray bool, startTgBot bool) (err error) {
 	}
 	service.StartTrafficWriter()
 
-	s.cron = cron.New(cron.WithLocation(loc), cron.WithSeconds())
+	// SkipIfStillRunning stops a slow job (e.g. the 5s traffic poll on a large
+	// install) from overlapping itself: two concurrent runs of the same job race
+	// the shared xrayAPI — leaking a grpc connection — and the StatsLastValues
+	// map, whose concurrent write is a fatal runtime throw cron.Recover can't
+	// catch. cron.Recover then logs any panic and keeps the scheduler alive.
+	s.cron = cron.New(
+		cron.WithLocation(loc),
+		cron.WithSeconds(),
+		cron.WithChain(
+			cron.SkipIfStillRunning(cron.DiscardLogger),
+			cron.Recover(cron.PrintfLogger(cronPanicLogger{})),
+		),
+	)
 	s.cron.Start()
 
 	// Wire the inbound-runtime manager once so InboundService can route
@@ -487,7 +552,7 @@ func (s *Server) start(restartXray bool, startTgBot bool) (err error) {
 		}
 	}
 	listenAddr := net.JoinHostPort(listen, strconv.Itoa(port))
-	listener, err := net.Listen("tcp", listenAddr)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", listenAddr)
 	if err != nil {
 		return err
 	}
@@ -526,9 +591,7 @@ func (s *Server) start(restartXray bool, startTgBot bool) (err error) {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	go func() {
-		s.httpServer.Serve(listener)
-	}()
+	go network.ServeHTTP(s.httpServer, listener, "Web server")
 
 	// Create event bus before startTask so jobs can use it
 	s.bus = eventbus.New(eventbus.DefaultBufferSize)
@@ -566,13 +629,35 @@ func (s *Server) start(restartXray bool, startTgBot bool) (err error) {
 		return nil
 	})
 
-	s.startTask(restartXray)
+	controller.SetReloadTgbotFunc(func() {
+		enabled, err := s.settingService.GetTgbotEnabled()
+		if err != nil || !enabled {
+			if s.tgbotService.IsRunning() {
+				s.tgbotService.Stop()
+			}
+			if s.bus != nil {
+				s.bus.Unsubscribe("tg-notifier")
+			}
+			return
+		}
+		// Start() stops any previous receiver first, so it is safe whether or not the bot is already running.
+		tgBot := s.tgbotService.NewTgbot()
+		if startErr := tgBot.Start(i18nFS); startErr != nil {
+			logger.Warning("reload Telegram bot failed:", startErr)
+			return
+		}
+		if s.bus != nil {
+			s.bus.Subscribe("tg-notifier", s.tgbotService.HandleEvent)
+		}
+	})
+
+	s.startTask(restartXray, loc)
 
 	if startTgBot {
 		isTgbotenabled, err := s.settingService.GetTgbotEnabled()
 		if (err == nil) && (isTgbotenabled) {
 			tgBot := s.tgbotService.NewTgbot()
-			tgBot.Start(i18nFS)
+			_ = tgBot.Start(i18nFS)
 			// Subscribe Telegram notifications for event bus
 			s.bus.Subscribe("tg-notifier", s.tgbotService.HandleEvent)
 		}
@@ -593,7 +678,7 @@ func (s *Server) StopPanelOnly() error {
 func (s *Server) stop(stopXray bool, stopTgBot bool) error {
 	s.cancel()
 	if stopXray {
-		s.xrayService.StopXray()
+		_ = s.xrayService.StopXray()
 		mtproto.GetManager().StopAll()
 	}
 	if s.cron != nil {

@@ -18,6 +18,7 @@ export const AllSettingSchema = z.object({
   expireDiff: nonNegativeInt.optional(),
   trafficDiff: nonNegativeInt.max(100).optional(),
   remarkTemplate: z.string().optional(),
+  subShowIdentityOnAllLinks: z.boolean().optional(),
   datepicker: z.enum(['gregorian', 'jalalian']).optional(),
   tgBotEnable: z.boolean().optional(),
   tgBotToken: z.string().optional(),
@@ -27,18 +28,26 @@ export const AllSettingSchema = z.object({
   tgRunTime: z.string().optional(),
   tgBotBackup: z.boolean().optional(),
   tgCpu: z.number().int().min(0).max(100).optional(),
+  outboundDownThreshold: z.number().int().min(1).max(100).optional(),
   tgLang: z.string().optional(),
   twoFactorEnable: z.boolean().optional(),
   twoFactorToken: z.string().optional(),
   xrayTemplateConfig: z.string().optional(),
   subEnable: z.boolean().optional(),
   subJsonEnable: z.boolean().optional(),
+  subJsonAutoDetect: z.boolean().optional(),
+  subJsonAlwaysArray: z.boolean().optional(),
+  subJsonUserAgentRegex: z.string().max(2048).optional(),
+  subClashAutoDetect: z.boolean().optional(),
+  subClashUserAgentRegex: z.string().max(2048).optional(),
   subTitle: z.string().optional(),
   subSupportUrl: z.string().optional(),
   subProfileUrl: z.string().optional(),
   subAnnounce: z.string().optional(),
   subEnableRouting: z.boolean().optional(),
   subRoutingRules: z.string().optional(),
+  subIncyEnableRouting: z.boolean().optional(),
+  subIncyRoutingRules: z.string().optional(),
   subListen: z.string().optional(),
   subPort: port.optional(),
   subPath: absolutePath.optional(),
@@ -51,7 +60,7 @@ export const AllSettingSchema = z.object({
   restartXrayOnClientDisable: z.boolean().optional(),
   subCertFile: z.string().optional(),
   subKeyFile: z.string().optional(),
-  subUpdates: z.number().int().min(1).max(168).optional(),
+  subUpdates: z.number().int().min(0).max(525600).optional(),
   subEncrypt: z.boolean().optional(),
   subURI: z.string().optional(),
   subJsonURI: z.string().optional(),
@@ -61,11 +70,13 @@ export const AllSettingSchema = z.object({
   subJsonMux: z.string().optional(),
   subJsonRules: z.string().optional(),
   subJsonFinalMask: z.string().optional(),
+  subHideSettings: z.boolean().optional(),
   timeLocation: z.string().optional(),
   ldapEnable: z.boolean().optional(),
   ldapHost: z.string().optional(),
   ldapPort: port.optional(),
   ldapUseTLS: z.boolean().optional(),
+  ldapInsecureSkipVerify: z.boolean().optional(),
   ldapBindDN: z.string().optional(),
   ldapPassword: z.string().optional(),
   ldapBaseDN: z.string().optional(),
@@ -92,3 +103,16 @@ export const AllSettingSchema = z.object({
 }).loose();
 
 export type AllSettingInput = z.infer<typeof AllSettingSchema>;
+
+// Existing installations can contain regex values saved before the backend
+// enforced its 2,048-character limit. Accept those values when reading so the
+// settings page can display and let users correct them, while keeping the
+// stricter schema above for outgoing updates.
+export const AllSettingResponseSchema = AllSettingSchema.extend({
+  subJsonUserAgentRegex: z.string().optional(),
+  subClashUserAgentRegex: z.string().optional(),
+});
+
+export const FactoryDefaultsSchema = z.record(z.string(), z.string());
+
+export type FactoryDefaults = z.infer<typeof FactoryDefaultsSchema>;

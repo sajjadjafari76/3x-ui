@@ -7,35 +7,51 @@
 #   * /etc/x-ui/install-result.env exists (mode 600) with random, non-default creds
 #   * the panel reports hasDefaultCredential: false (no admin/admin remains)
 #   * the panel HTTP server actually serves on the generated port/base path
+#   * with a [version] argument: the installed binary reports exactly that version
 #
 # Requires Docker and network access (install.sh downloads the released binary).
-# Usage: bash deploy/test/smoke-noninteractive.sh
+# Usage: bash deploy/test/smoke-noninteractive.sh [version]
+#   With no argument install.sh resolves releases/latest. Pass an explicit tag
+#   (e.g. v3.4.2) to verify that exact release — the tag-triggered CI run does
+#   this so it cannot silently validate the previous release (#5756).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${SMOKE_IMAGE:-ubuntu:24.04}"
+XUI_SMOKE_VERSION="${1:-}"
 
 if ! command -v docker > /dev/null 2>&1; then
     echo "ERROR: docker is required for this smoke test." >&2
     exit 1
 fi
 
-echo "== non-interactive install smoke test (image: $IMAGE) =="
+echo "== non-interactive install smoke test (image: $IMAGE, version: ${XUI_SMOKE_VERSION:-latest}) =="
 
 docker run --rm \
     -v "${REPO_ROOT}/install.sh:/root/install.sh:ro" \
     -e XUI_NONINTERACTIVE=1 \
     -e XUI_SSL_MODE=none \
+    -e XUI_SMOKE_VERSION="$XUI_SMOKE_VERSION" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$IMAGE" bash -euo pipefail -c '
         apt-get update -qq
         apt-get install -y -qq curl tar openssl ca-certificates > /dev/null
 
-        echo "--- running install.sh piped (no TTY) ---"
+        echo "--- running install.sh piped (no TTY), version: ${XUI_SMOKE_VERSION:-latest} ---"
         # Piping guarantees stdin is not a TTY, exercising the auto non-interactive path.
-        cat /root/install.sh | bash
+        if [ -n "${XUI_SMOKE_VERSION:-}" ]; then
+            cat /root/install.sh | bash -s -- "$XUI_SMOKE_VERSION"
+        else
+            cat /root/install.sh | bash
+        fi
 
         echo "--- assertions ---"
+        if [ -n "${XUI_SMOKE_VERSION:-}" ]; then
+            installed=$(/usr/local/x-ui/x-ui -v)
+            [ "$installed" = "${XUI_SMOKE_VERSION#v}" ] \
+                || { echo "FAIL: installed version $installed, want ${XUI_SMOKE_VERSION#v}"; exit 1; }
+        fi
+
         RESULT=/etc/x-ui/install-result.env
         test -f "$RESULT" || { echo "FAIL: $RESULT missing"; exit 1; }
 
@@ -70,6 +86,24 @@ docker run --rm \
             200|301|302|307|308) : ;;
             *) echo "FAIL: panel did not serve (status ${code:-none})"; tail -n 30 /tmp/xui.log; exit 1 ;;
         esac
+
+        echo "--- verifying a second install preserves custom bin/ files ---"
+        echo "custom-sentinel" > /usr/local/x-ui/bin/geoip_custom.dat
+        geoip_sum_before=$(sha256sum /usr/local/x-ui/bin/geoip.dat | cut -d" " -f1)
+
+        if [ -n "${XUI_SMOKE_VERSION:-}" ]; then
+            cat /root/install.sh | bash -s -- "$XUI_SMOKE_VERSION"
+        else
+            cat /root/install.sh | bash
+        fi
+
+        test -f /usr/local/x-ui/bin/geoip_custom.dat \
+            || { echo "FAIL: custom bin/ file did not survive a second install"; exit 1; }
+        [ "$(cat /usr/local/x-ui/bin/geoip_custom.dat)" = "custom-sentinel" ] \
+            || { echo "FAIL: custom bin/ file content changed across a second install"; exit 1; }
+        geoip_sum_after=$(sha256sum /usr/local/x-ui/bin/geoip.dat | cut -d" " -f1)
+        [ "$geoip_sum_after" = "$geoip_sum_before" ] \
+            || { echo "FAIL: bundled geoip.dat changed across a same-version reinstall"; exit 1; }
 
         echo "SMOKE_PASS: user=$XUI_USERNAME port=$XUI_PANEL_PORT path=$XUI_WEB_BASE_PATH"
     '

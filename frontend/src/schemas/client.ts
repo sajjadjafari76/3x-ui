@@ -10,6 +10,7 @@ export const ClientTrafficSchema = z.object({
   expiryTime: z.number().optional(),
   enable: z.boolean().optional(),
   lastOnline: z.number().optional(),
+  lastSubFetch: z.number().optional(),
 });
 
 export const ClientRecordSchema = z.object({
@@ -24,6 +25,7 @@ export const ClientRecordSchema = z.object({
   totalGB: z.number().optional(),
   expiryTime: z.number().optional(),
   limitIp: z.number().optional(),
+  limitHwid: z.number().optional(),
   tgId: z.union([z.number(), z.string()]).optional(),
   group: z.string().optional(),
   comment: z.string().optional(),
@@ -32,6 +34,13 @@ export const ClientRecordSchema = z.object({
   inboundIds: nullableNumberArray.optional(),
   traffic: ClientTrafficSchema.nullable().optional(),
   reverse: z.object({ tag: z.string().optional() }).loose().nullable().optional(),
+  privateKey: z.string().optional(),
+  publicKey: z.string().optional(),
+  allowedIPs: z.string().optional(),
+  preSharedKey: z.string().optional(),
+  keepAlive: z.number().optional(),
+  secret: z.string().optional(),
+  adTag: z.string().optional(),
   createdAt: z.number().optional(),
   updatedAt: z.number().optional(),
 }).loose();
@@ -44,15 +53,32 @@ export const InboundOptionSchema = z.object({
   port: z.number().optional(),
   tlsFlowCapable: z.boolean().optional(),
   ssMethod: z.string().optional(),
+  wgPublicKey: z.string().optional(),
+  wgMtu: z.number().optional(),
+  wgDns: z.string().optional(),
+  mtprotoDomain: z.string().optional(),
   // Hosting node id; absent/null for this panel's own inbounds (#4997).
   nodeId: z.number().nullable().optional(),
+  // Share-host resolution inputs, mirroring the backend resolveInboundAddress so
+  // the clients page picks the same WireGuard endpoint host as the subscription:
+  // the hosting node address, the inbound listen, and its share-address strategy.
+  nodeAddress: z.string().optional(),
+  listen: z.string().optional(),
+  shareAddr: z.string().optional(),
+  shareAddrStrategy: z.string().optional(),
 }).loose();
 
 export const InboundOptionsSchema = z.array(InboundOptionSchema);
 
+// The *Count fields are exact; the email arrays stop at the server's cap and
+// only feed the hover popovers, so never derive a counter from their length.
 export const ClientsSummarySchema = z.object({
   total: z.number(),
   active: z.number(),
+  onlineCount: z.number().optional().default(0),
+  depletedCount: z.number().optional().default(0),
+  expiringCount: z.number().optional().default(0),
+  deactiveCount: z.number().optional().default(0),
   online: nullableStringArray,
   depleted: nullableStringArray,
   expiring: nullableStringArray,
@@ -96,6 +122,13 @@ export const BulkAdjustResultSchema = z.object({
 
 export const BulkDeleteResultSchema = z.object({
   deleted: z.number(),
+  skipped: z
+    .array(z.object({ email: z.string(), reason: z.string() }))
+    .optional(),
+});
+
+export const BulkSetEnableResultSchema = z.object({
+  changed: z.number(),
   skipped: z
     .array(z.object({ email: z.string(), reason: z.string() }))
     .optional(),
@@ -173,6 +206,7 @@ export const ClientFormSchema = z.object({
   delayedDays: z.number().int().min(0),
   reset: z.number().int().min(0),
   limitIp: z.number().int().min(0),
+  limitHwid: z.number().int().min(0),
   tgId: z.number().int().min(0),
   group: z.string(),
   comment: z.string(),
@@ -188,8 +222,9 @@ export const ClientBulkAdjustFormSchema = z
   .object({
     addDays: z.number().int(),
     addGB: z.number(),
+    flow: z.string().optional().default(''),
   })
-  .refine((v) => v.addDays !== 0 || v.addGB !== 0, {
+  .refine((v) => v.addDays !== 0 || v.addGB !== 0 || v.flow !== '', {
     message: 'pages.clients.bulkAdjustNothing',
   });
 
@@ -205,6 +240,7 @@ export const ClientBulkAddFormSchema = z.object({
   comment: z.string(),
   flow: z.string(),
   limitIp: z.number().int().min(0),
+  limitHwid: z.number().int().min(0),
   totalGB: z.number().min(0),
   expiryTime: z.number(),
   reset: z.number().int().min(0),
@@ -220,6 +256,7 @@ export type ClientPageResponse = z.infer<typeof ClientPageResponseSchema>;
 export type ClientHydrate = z.infer<typeof ClientHydrateSchema>;
 export type BulkAdjustResult = z.infer<typeof BulkAdjustResultSchema>;
 export type BulkDeleteResult = z.infer<typeof BulkDeleteResultSchema>;
+export type BulkSetEnableResult = z.infer<typeof BulkSetEnableResultSchema>;
 export type BulkCreateResult = z.infer<typeof BulkCreateResultSchema>;
 export type BulkAttachResult = z.infer<typeof BulkAttachResultSchema>;
 export type BulkDetachResult = z.infer<typeof BulkDetachResultSchema>;

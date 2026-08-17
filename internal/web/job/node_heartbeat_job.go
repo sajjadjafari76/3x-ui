@@ -9,6 +9,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 	"github.com/mhsanaei/3x-ui/v3/internal/eventbus"
 	"github.com/mhsanaei/3x-ui/v3/internal/logger"
+	"github.com/mhsanaei/3x-ui/v3/internal/util/common"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/websocket"
 )
@@ -50,18 +51,19 @@ func (j *NodeHeartbeatJob) Run() {
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(n *model.Node) {
+		n := n
+		common.GoRecover("node-heartbeat:"+n.Name, func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 			j.probeOne(n)
-		}(n)
+		})
 	}
 	wg.Wait()
 
 	if !websocket.HasClients() {
 		return
 	}
-	updated, err := j.nodeService.GetNodeTree()
+	updated, err := j.nodeService.GetNodeTreeView()
 	if err != nil {
 		logger.Warning("node heartbeat: load nodes for broadcast failed:", err)
 		return
