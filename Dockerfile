@@ -1,7 +1,33 @@
 # ========================================================
+# 3x-ui image for Runflare's Docker service.
+#
+# THIS FILE ONLY EXISTS IN THIS FORM ON THE `runflare` BRANCH.
+#
+# Runflare's Docker service builds whatever `Dockerfile` sits at the repo root
+# and gives no way to point it at another filename, so the Runflare variant has
+# to *be* the root Dockerfile. To keep that from conflicting with every
+# MHSanaei/3x-ui sync, it lives on a branch:
+#
+#   main      -> upstream's Dockerfile, untouched, syncs cleanly forever
+#   runflare  -> this file; the branch the Runflare service deploys
+#
+# To pick up an upstream update: sync `main`, then `git checkout runflare &&
+# git merge main`. Expect a conflict in this file alone; keep this version
+# unless upstream changed the build itself, then port the change across.
+#
+# Differences from upstream's Dockerfile, all forced by the platform:
+#   1. No BuildKit  -> $BUILDPLATFORM/$TARGETARCH are not populated.
+#   2. Unprivileged K8s pod -> no NET_ADMIN, so Fail2ban can never apply a ban.
+#   3. Build network reaches GitHub unreliably -> the Xray download must be
+#      verified, not assumed.
+# ========================================================
+
+# ========================================================
 # Stage: Frontend (Vite)
 # ========================================================
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
+# No --platform: Runflare builds without BuildKit, so $BUILDPLATFORM expands to
+# an empty string and `--platform=` is a parse error.
+FROM node:22-alpine AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -9,12 +35,23 @@ COPY frontend/ ./
 COPY internal/web/translation /src/internal/web/translation
 RUN npm run build
 
+# The Go build embeds this directory via //go:embed all:dist
+# (internal/web/web.go). It is gitignored, so it only ever exists because this
+# stage produced it — fail loudly here rather than in an opaque compile error.
+RUN test -f /src/internal/web/dist/index.html \
+  || (echo "FATAL: frontend build produced no dist/index.html" && exit 1)
+
 # ========================================================
 # Stage: Builder
 # ========================================================
 FROM golang:1.26-alpine AS builder
 WORKDIR /app
-ARG TARGETARCH
+
+# Upstream leaves this to BuildKit. Without BuildKit it is empty and
+# DockerInit.sh silently falls through to its `*)` amd64 branch. Pin it so the
+# target architecture is a deliberate choice; override with
+# --build-arg TARGETARCH=arm64 if Runflare ever schedules onto arm nodes.
+ARG TARGETARCH=amd64
 
 RUN apk --no-cache --update add \
   build-base \
@@ -25,22 +62,36 @@ RUN apk --no-cache --update add \
 COPY . .
 COPY --from=frontend /src/internal/web/dist ./internal/web/dist
 
+# SQLite needs cgo; this is why a plain Go buildpack cannot build this project.
 ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
 RUN go build -ldflags "-w -s" -o build/x-ui main.go
-RUN sh ./DockerInit.sh "$TARGETARCH"
+
+# DockerInit.sh fetches Xray-core, mtg and the geo .dat files with `curl -sfLRO`.
+# A failed curl there does NOT fail the script, so upstream can silently produce
+# an image with no xray binary — the panel then starts fine and every inbound
+# fails at runtime. Assert the artifacts landed.
+RUN sh ./DockerInit.sh "$TARGETARCH" \
+  && test -x "build/bin/xray-linux-${TARGETARCH}" \
+    || (echo "FATAL: DockerInit.sh did not produce build/bin/xray-linux-${TARGETARCH} (blocked download?)" && exit 1)
+RUN for f in geoip.dat geosite.dat; do \
+      test -s "build/bin/$f" || (echo "FATAL: missing build/bin/$f" && exit 1); \
+    done
 
 # ========================================================
-# Stage: Final Image of 3x-ui
+# Stage: Final image
 # ========================================================
 FROM alpine
 ENV TZ=Asia/Tehran
 WORKDIR /app
 
+# No fail2ban: it needs NET_ADMIN/NET_RAW (see cap_add in docker-compose.yml) to
+# install iptables rules. Runflare pods are unprivileged, so the jail would log
+# bans and show them in `fail2ban-client status` while never blocking anything.
+# Shipping it would be misleading, not just wasteful.
 RUN apk add --no-cache --update \
   ca-certificates \
   tzdata \
-  fail2ban \
   bash \
   curl \
   openssl
@@ -50,14 +101,6 @@ COPY --from=builder /app/DockerEntrypoint.sh /app/
 COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
 COPY --from=builder /app/internal/web/translation /app/internal/web/translation
 
-
-# Configure fail2ban
-RUN rm -f /etc/fail2ban/jail.d/alpine-ssh.conf \
-  && cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local \
-  && sed -i "s/^\[ssh\]$/&\nenabled = false/" /etc/fail2ban/jail.local \
-  && sed -i "s/^\[sshd\]$/&\nenabled = false/" /etc/fail2ban/jail.local \
-  && sed -i "s/#allowipv6 = auto/allowipv6 = auto/g" /etc/fail2ban/fail2ban.conf
-
 RUN chmod +x \
   /app/DockerEntrypoint.sh \
   /app/x-ui \
@@ -65,10 +108,28 @@ RUN chmod +x \
 
 ENV XUI_IN_DOCKER="true"
 ENV XUI_MAIN_FOLDER="/app"
-ENV XUI_ENABLE_FAIL2BAN="true"
+
+# Must stay "false" — see the fail2ban note above. The entrypoint skips its
+# whole jail-setup block when this is not "true".
+ENV XUI_ENABLE_FAIL2BAN="false"
+
+# Runflare terminates TLS at its ingress and proxies plain HTTP to the pod;
+# an app-issued HSTS header on that hop causes redirect loops.
+ENV XUI_SKIP_HSTS="true"
+
+# The panel reads XUI_PORT (internal/config/config.go: GetPortOverride) and the
+# DB location from XUI_DB_FOLDER (GetDBFolderPath). Both are set in the Runflare
+# dashboard, not baked in: XUI_PORT must match the port Runflare routes to, and
+# XUI_DB_FOLDER must be the mount path of the attached disk or every redeploy
+# wipes the admin account and all inbounds.
 ENV XUI_DB_TYPE=""
 ENV XUI_DB_DSN=""
+
+# Documentation only — Runflare routes to the port you configure, and the
+# default 2053 will not be reached unless you set XUI_PORT to match.
 EXPOSE 2053
-VOLUME [ "/etc/x-ui" ]
+
+# No VOLUME declaration: Runflare attaches its own persistent disk, and an
+# anonymous-volume hint only confuses that.
 CMD [ "./x-ui" ]
 ENTRYPOINT [ "/app/DockerEntrypoint.sh" ]
