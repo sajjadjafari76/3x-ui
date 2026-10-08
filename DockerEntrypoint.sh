@@ -1,5 +1,21 @@
 #!/bin/sh
 
+# PaaS compatibility (Runflare, Heroku-style Kubernetes platforms): these
+# inject the port the router forwards traffic to as $PORT. Use it for the
+# panel unless XUI_PORT is set explicitly.
+if [ -z "$XUI_PORT" ] && [ -n "$PORT" ]; then
+    export XUI_PORT="$PORT"
+fi
+
+# Fail2ban enforces bans with iptables and needs NET_ADMIN. Managed Kubernetes
+# platforms don't grant it, so disable it instead of starting a jail that can
+# never ban anyone.
+if [ "$XUI_ENABLE_FAIL2BAN" = "true" ] && ! iptables -L -n >/dev/null 2>&1; then
+    echo "DockerEntrypoint: NET_ADMIN unavailable, disabling fail2ban" >&2
+    XUI_ENABLE_FAIL2BAN="false"
+    export XUI_ENABLE_FAIL2BAN
+fi
+
 # Start fail2ban with the 3x-ipl jail
 if [ "$XUI_ENABLE_FAIL2BAN" = "true" ]; then
     LOG_FOLDER="${XUI_LOG_FOLDER:-/var/log/x-ui}"
