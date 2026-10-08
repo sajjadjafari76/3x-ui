@@ -263,6 +263,11 @@ func remarkVarValue(token string, ctx remarkContext) string {
 			return strconv.Itoa(c.Reset)
 		}
 		return ""
+	case "RESET_DAY":
+		if c.ResetDay > 0 {
+			return strconv.Itoa(c.ResetDay)
+		}
+		return ""
 	case "STATUS_EMOJI":
 		return statusEmoji(st)
 	case "USAGE_PERCENTAGE":
@@ -620,7 +625,7 @@ func (s *SubService) effectiveTemplate(client model.Client) string {
 		s.usageShown = map[string]bool{}
 	}
 	key := templateInfoKey(client)
-	if s.usageShown[key] {
+	if s.subInfoNodeEnable || s.usageShown[key] {
 		remove := firstLinkOnlyBodyTokens
 		if s.showIdentityOnAllLinks {
 			remove = usageInfoTokens

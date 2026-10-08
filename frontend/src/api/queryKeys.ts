@@ -1,4 +1,5 @@
 export const keys = {
+  sponsors: () => ['sponsors'] as const,
   server: {
     status: () => ['server', 'status'] as const,
     fail2banStatus: () => ['server', 'fail2banStatus'] as const,
@@ -12,6 +13,10 @@ export const keys = {
     list: () => ['hosts', 'list'] as const,
     byInbound: (inboundId: number) => ['hosts', 'byInbound', inboundId] as const,
     tags: () => ['hosts', 'tags'] as const,
+  },
+  subBalancers: {
+    root: () => ['sub-balancers'] as const,
+    list: () => ['sub-balancers', 'list'] as const,
   },
   settings: {
     root: () => ['settings'] as const,
@@ -41,7 +46,8 @@ export const keys = {
     geodata: {
       root: () => ['xray', 'geodata'] as const,
       files: () => ['xray', 'geodata', 'files'] as const,
-      categories: (file: string, query: string) => ['xray', 'geodata', 'categories', file, query] as const,
+      categories: (file: string, query: string) =>
+        ['xray', 'geodata', 'categories', file, query] as const,
       entries: (file: string, code: string, query: string, offset: number, limit: number) =>
         ['xray', 'geodata', 'entries', file, code, query, offset, limit] as const,
     },
