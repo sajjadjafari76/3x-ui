@@ -10,7 +10,7 @@ The image works unchanged on Runflare; the entrypoint adapts automatically:
    `docker build -t <registry>/<user>/3x-ui:latest . && docker push <registry>/<user>/3x-ui:latest`
 2. In the service's **Images** page, select that image.
 3. Environment variables:
-   - `XUI_PORT=2053` (and set the service/router port to 2053), or rely on `PORT`.
+   - `XUI_PORT=8000`, and on the service's *Application* page choose **Expose Port 8000** (Runflare only offers 80, 3000, 5000, 8000).
    - `XUI_ENABLE_FAIL2BAN=false` (optional, auto-detected)
    - Optional: `XUI_DB_TYPE=postgres` + `XUI_DB_DSN=...` to keep data in an external DB.
 4. **Persistent disk**: mount a volume at `/etc/x-ui` (database). Without it, settings/users are lost on every restart.

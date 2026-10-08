@@ -68,7 +68,8 @@ ENV XUI_MAIN_FOLDER="/app"
 ENV XUI_ENABLE_FAIL2BAN="true"
 ENV XUI_DB_TYPE=""
 ENV XUI_DB_DSN=""
-EXPOSE 2053
-VOLUME [ "/etc/x-ui" ]
+# 8000 is one of the ports Runflare can expose (80/3000/5000/8000); set
+# XUI_PORT=8000 there. Mount a disk at /etc/x-ui for persistence.
+EXPOSE 2053 8000
 CMD [ "./x-ui" ]
 ENTRYPOINT [ "/app/DockerEntrypoint.sh" ]
